@@ -1,0 +1,32 @@
+# ---- Etapa de build ----
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+WORKDIR /src
+
+# Copiamos solo los .csproj primero para aprovechar el cache de Docker
+# (si no cambiaron las dependencias, no vuelve a hacer restore).
+COPY ["src/CeleCamIp.Gateway/CeleCamIp.Gateway.csproj", "src/CeleCamIp.Gateway/"]
+COPY ["src/CeleCamIp.Shared/CeleCamIp.Shared.csproj", "src/CeleCamIp.Shared/"]
+RUN dotnet restore "src/CeleCamIp.Gateway/CeleCamIp.Gateway.csproj"
+
+COPY src/CeleCamIp.Gateway/ src/CeleCamIp.Gateway/
+COPY src/CeleCamIp.Shared/ src/CeleCamIp.Shared/
+
+RUN dotnet publish "src/CeleCamIp.Gateway/CeleCamIp.Gateway.csproj" \
+    -c Release \
+    -o /app/publish \
+    --no-restore
+
+# ---- Etapa final (runtime) ----
+FROM mcr.microsoft.com/dotnet/runtime:9.0
+WORKDIR /app
+
+# ffmpeg: las librerias nativas que SIPSorceryMedia.FFmpeg necesita para
+# poder leer el RTSP de las camaras y codificar el video para WebRTC.
+# Sin esto, FFmpegInit.EnsureBinariesRegistered() falla en tiempo de ejecucion.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /app/publish .
+
+ENTRYPOINT ["dotnet", "CeleCamIp.Gateway.dll"]

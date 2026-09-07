@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:cameras="clr-namespace:CeleCamIp.Shared.Cameras;assembly=CeleCamIp.Shared"
+             x:Class="CeleCamIp.App.Views.CamerasPage"
+             Title="Camaras">
+
+    <Grid RowDefinitions="Auto,*" Padding="16">
+
+        <Label Grid.Row="0" Text="{Binding HouseTitle}" FontAttributes="Bold" FontSize="18" Margin="0,0,0,12" />
+
+        <CollectionView Grid.Row="1" ItemsSource="{Binding Cameras}">
+            <CollectionView.EmptyView>
+                <VerticalStackLayout HorizontalOptions="Center" VerticalOptions="Center" Spacing="8" Padding="24">
+                    <Label Text="Esta casa todavia no reporto camaras."
+                           HorizontalTextAlignment="Center"
+                           FontAttributes="Bold" />
+                    <Label Text="El Gateway las detecta apenas se conecta al servidor; puede tardar unos segundos."
+                           HorizontalTextAlignment="Center"
+                           TextColor="Gray" />
+                </VerticalStackLayout>
+            </CollectionView.EmptyView>
+
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="cameras:CameraDescriptor">
+                    <Frame Margin="0,6" Padding="14" CornerRadius="10" BorderColor="LightGray">
+                        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                            <Label Grid.Row="0" Grid.Column="0" Text="{Binding Name}" FontAttributes="Bold" FontSize="16" />
+                            <Label Grid.Row="1" Grid.Column="0" Text="{Binding IpAddress}" TextColor="Gray" FontSize="13" />
+
+                            <Button Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                                    Text="Ver en vivo"
+                                    Clicked="OnViewLiveClicked"
+                                    BindingContext="{Binding .}" />
+                        </Grid>
+                    </Frame>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+    </Grid>
+
+</ContentPage>

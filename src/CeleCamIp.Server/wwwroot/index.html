@@ -1,0 +1,202 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>CeleCamIp - Viewer de prueba WebRTC</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; background:#111; color:#eee; margin:0; padding:16px; }
+  h1 { font-size:18px; }
+  #log { background:#000; color:#0f0; font-family: monospace; font-size:12px; height:180px; overflow-y:auto; padding:8px; border-radius:6px; white-space:pre-wrap; }
+  .houses { display:flex; flex-direction:column; gap:8px; margin:12px 0; }
+  .house { border:1px solid #333; border-radius:8px; padding:8px; }
+  .house h3 { margin:4px 0; }
+  .cam { display:flex; align-items:center; gap:8px; margin:4px 0; }
+  button { cursor:pointer; padding:4px 10px; border-radius:6px; border:1px solid #555; background:#222; color:#eee; }
+  button:hover { background:#333; }
+  video { width:480px; max-width:100%; background:#000; border-radius:8px; margin-top:12px; }
+  .offline { opacity:0.5; }
+</style>
+</head>
+<body>
+  <h1>CeleCamIp â€” Viewer de prueba (WebRTC nativo del navegador)</h1>
+  <p>Este viewer sirve para validar el puente RTSPâ†’WebRTC de punta a punta, sin depender todavia de la app MAUI.</p>
+
+  <div id="houses" class="houses">Conectando al servidor...</div>
+
+  <video id="video" autoplay playsinline controls></video>
+
+  <h3>Log</h3>
+  <div id="log"></div>
+
+<script>
+const logEl = document.getElementById('log');
+function log(...args) {
+  const line = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  console.log(line);
+  logEl.textContent += line + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+const videoEl = document.getElementById('video');
+const housesEl = document.getElementById('houses');
+
+// ICE servers de prueba. El STUN alcanza para probar en LAN/localhost;
+// para probar de verdad por WAN despues hay que espejar aca el mismo
+// TURN (ExpressTURN) que tiene configurado el Gateway.
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' }
+];
+
+let pc = null;
+let currentHouseId = null;
+let currentCameraId = null;
+
+// La API key se pide por prompt en vez de estar hardcodeada en el HTML:
+// esta pagina de prueba es publica, y si alguien mira el codigo fuente
+// no debe encontrar la clave ahi escrita.
+const apiKey = prompt('API key del servidor (Auth:ApiKey):');
+if (!apiKey) {
+  document.body.innerHTML = '<p>Se necesita una API key valida para usar este viewer de prueba.</p>';
+  throw new Error('Sin API key, no se intenta conectar.');
+}
+
+const connection = new signalR.HubConnectionBuilder()
+  .withUrl('/hubs/gateway', { accessTokenFactory: () => apiKey })
+  .withAutomaticReconnect()
+  .build();
+
+connection.on('HouseOnline', (houseId) => {
+  log('[Hub] HouseOnline', houseId);
+  upsertHouse(houseId, true, []);
+});
+
+connection.on('HouseOffline', (houseId) => {
+  log('[Hub] HouseOffline', houseId);
+  const el = document.getElementById('house-' + cssId(houseId));
+  if (el) el.classList.add('offline');
+});
+
+connection.on('CamerasUpdated', (houseId, cameras) => {
+  log('[Hub] CamerasUpdated', houseId, cameras);
+  upsertHouse(houseId, true, cameras);
+});
+
+connection.on('ReceiveOffer', async (cameraId, offer) => {
+  log('[Hub] ReceiveOffer', cameraId, offer.type);
+  if (!pc) {
+    log('ERROR: llego una oferta pero no hay RTCPeerConnection armada (no deberÃ­a pasar).');
+    return;
+  }
+  await pc.setRemoteDescription({ type: offer.type, sdp: offer.sdp });
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  log('Mandando answer al Gateway via Server...');
+  await connection.invoke('SendAnswer', currentHouseId, currentCameraId, { type: answer.type, sdp: answer.sdp });
+});
+
+connection.on('ReceiveIceCandidate', async (cameraId, candidate) => {
+  if (!pc) return;
+  try {
+    await pc.addIceCandidate({
+      candidate: candidate.candidate,
+      sdpMid: candidate.sdpMid,
+      sdpMLineIndex: candidate.sdpMLineIndex,
+      usernameFragment: candidate.usernameFragment
+    });
+    log('[ICE] candidato remoto agregado');
+  } catch (e) {
+    log('[ICE] error agregando candidato remoto:', e.message);
+  }
+});
+
+connection.on('StreamError', (a, b) => {
+  // Puede llegar como (houseId, cameraId, reason) o (cameraId, reason) segun el origen.
+  log('[Hub] StreamError', a, b);
+});
+
+async function main() {
+  try {
+    await connection.start();
+    log('Conectado al Hub SignalR.');
+    const snapshot = await connection.invoke('JoinAsViewer');
+    log('Snapshot inicial:', snapshot);
+    housesEl.innerHTML = '';
+    if (snapshot.length === 0) {
+      housesEl.textContent = 'No hay casas registradas todavia. Esperando a que el Gateway se conecte...';
+    }
+    snapshot.forEach(h => upsertHouse(h.houseId, h.isOnline, h.cameras || []));
+  } catch (err) {
+    log('ERROR conectando al Hub:', err.message);
+  }
+}
+
+function cssId(houseId) {
+  return houseId.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+function upsertHouse(houseId, isOnline, cameras) {
+  if (housesEl.textContent.includes('No hay casas') || housesEl.textContent.includes('Conectando')) {
+    housesEl.innerHTML = '';
+  }
+  let el = document.getElementById('house-' + cssId(houseId));
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'house';
+    el.id = 'house-' + cssId(houseId);
+    housesEl.appendChild(el);
+  }
+  el.classList.toggle('offline', !isOnline);
+  el.innerHTML = `<h3>Casa: ${houseId} ${isOnline ? '(online)' : '(offline)'}</h3>`;
+  (cameras || []).forEach(cam => {
+    const row = document.createElement('div');
+    row.className = 'cam';
+    row.innerHTML = `<span>${cam.name || cam.id} â€” ${cam.streamUrl || ''}</span>`;
+    const btn = document.createElement('button');
+    btn.textContent = 'Ver';
+    btn.onclick = () => verCamara(houseId, cam.id);
+    row.appendChild(btn);
+    el.appendChild(row);
+  });
+}
+
+async function verCamara(houseId, cameraId) {
+  log(`Pidiendo stream: casa=${houseId} camara=${cameraId}`);
+  currentHouseId = houseId;
+  currentCameraId = cameraId;
+
+  if (pc) {
+    pc.close();
+  }
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+  pc.ontrack = (event) => {
+    log('[PC] ontrack â€” video recibido');
+    videoEl.srcObject = event.streams[0];
+  };
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      connection.invoke('SendIceCandidateToGateway', houseId, cameraId, {
+        candidate: event.candidate.candidate,
+        sdpMid: event.candidate.sdpMid,
+        sdpMLineIndex: event.candidate.sdpMLineIndex,
+        usernameFragment: event.candidate.usernameFragment
+      }).catch(e => log('Error mandando ICE candidate:', e.message));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    log('[PC] connectionState =', pc.connectionState);
+  };
+  pc.oniceconnectionstatechange = () => {
+    log('[PC] iceConnectionState =', pc.iceConnectionState);
+  };
+
+  await connection.invoke('RequestStream', houseId, cameraId);
+}
+
+main();
+</script>
+</body>
+</html>

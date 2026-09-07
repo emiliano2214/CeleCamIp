@@ -1,0 +1,6 @@
+﻿**/bin/
+**/obj/
+publish/
+*.user
+gateway_log.txt
+.vs/

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:conv="clr-namespace:CeleCamIp.App.Converters"
+             xmlns:cameras="clr-namespace:CeleCamIp.Shared.Cameras;assembly=CeleCamIp.Shared"
+             x:Class="CeleCamIp.App.Views.HousesPage"
+             Title="CeleCamIp">
+
+    <ContentPage.Resources>
+        <conv:BoolToStatusColorConverter x:Key="BoolToStatusColor" />
+        <conv:BoolToStatusTextConverter x:Key="BoolToStatusText" />
+        <conv:CameraCountConverter x:Key="CameraCount" />
+    </ContentPage.Resources>
+
+    <Grid RowDefinitions="Auto,*" Padding="16">
+
+        <!-- Barra de estado de conexion con el servidor -->
+        <HorizontalStackLayout Grid.Row="0" Spacing="8" Margin="0,0,0,12">
+            <Ellipse Fill="{Binding StatusColor}" WidthRequest="12" HeightRequest="12" VerticalOptions="Center" />
+            <Label Text="{Binding StatusText}" VerticalOptions="Center" FontAttributes="Bold" />
+        </HorizontalStackLayout>
+
+        <RefreshView Grid.Row="1" IsRefreshing="{Binding IsRefreshing}" Refreshing="OnRefreshing">
+            <CollectionView ItemsSource="{Binding Houses}"
+                             SelectionMode="Single"
+                             SelectionChanged="OnHouseSelected">
+                <CollectionView.EmptyView>
+                    <VerticalStackLayout HorizontalOptions="Center" VerticalOptions="Center" Spacing="8" Padding="24">
+                        <Label Text="Todavia no hay casas conectadas."
+                               HorizontalTextAlignment="Center"
+                               FontAttributes="Bold" />
+                        <Label Text="Prende el Gateway en la casa y deslizá hacia abajo para refrescar."
+                               HorizontalTextAlignment="Center"
+                               TextColor="Gray" />
+                    </VerticalStackLayout>
+                </CollectionView.EmptyView>
+
+                <CollectionView.ItemTemplate>
+                    <DataTemplate x:DataType="cameras:HouseSnapshot">
+                        <Grid Padding="12" ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto">
+                            <Ellipse Grid.Row="0" Grid.RowSpan="2" Grid.Column="0"
+                                     Fill="{Binding IsOnline, Converter={StaticResource BoolToStatusColor}}"
+                                     WidthRequest="14" HeightRequest="14"
+                                     VerticalOptions="Center" Margin="0,0,12,0" />
+
+                            <Label Grid.Row="0" Grid.Column="1"
+                                   Text="{Binding HouseId}"
+                                   FontAttributes="Bold" FontSize="16" />
+
+                            <Label Grid.Row="1" Grid.Column="1"
+                                   Text="{Binding Cameras, Converter={StaticResource CameraCount}}"
+                                   TextColor="Gray" FontSize="13" />
+
+                            <Label Grid.Row="0" Grid.RowSpan="2" Grid.Column="2"
+                                   Text="{Binding IsOnline, Converter={StaticResource BoolToStatusText}}"
+                                   VerticalOptions="Center" TextColor="Gray" FontSize="12" />
+                        </Grid>
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+            </CollectionView>
+        </RefreshView>
+    </Grid>
+
+</ContentPage>

@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-CeleCamIp.Gateway-ba282c56-4887-4948-b7b0-c1357f909067</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.17" />
+    <PackageReference Include="SIPSorcery" Version="10.0.16" />
+    <PackageReference Include="SIPSorceryMedia.FFmpeg" Version="10.0.16" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CeleCamIp.Shared\CeleCamIp.Shared.csproj" />
+  </ItemGroup>
+
+  <!--
+    SIPSorceryMedia.FFmpeg (via FFmpeg.AutoGen 8.1.0) necesita los binarios nativos
+    de libav junto al ejecutable. Estos NO vienen con el paquete NuGet: hay que
+    copiarlos desde una instalacion real de FFmpeg 8.1.x (misma serie mayor que
+    el binding: avcodec-62, avformat-62, avutil-60, avdevice-62, avfilter-11,
+    swscale-9, swresample-6). Si en el futuro se actualiza FFmpeg.AutoGen a otra
+    version mayor, hay que actualizar FFmpegNativeDir a una instalacion de FFmpeg
+    con los numeros de DLL que coincidan, o esto va a fallar en silencio (arranca,
+    pero SIPSorceryMedia.FFmpeg no puede decodificar nada).
+  -->
+  <PropertyGroup>
+    <FFmpegNativeDir>C:\Users\emiab\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Shared_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build-shared\bin</FFmpegNativeDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FFmpegNativeDlls Include="$(FFmpegNativeDir)\av*.dll;$(FFmpegNativeDir)\sw*.dll" />
+  </ItemGroup>
+
+  <Target Name="CopyFFmpegNativeDlls" AfterTargets="Build">
+    <Copy SourceFiles="@(FFmpegNativeDlls)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="CeleCamIp.App.Views.CameraPlayerPage"
+             Title="{Binding CameraTitle}">
+
+    <Grid x:Name="rootGrid" RowDefinitions="Auto,*,Auto" Padding="16" RowSpacing="12">
+
+        <Label x:Name="subtitleLabel" Grid.Row="0" Text="{Binding CameraSubtitle}" TextColor="Gray" FontSize="13" />
+
+        <!-- El video se reproduce via WebRTC dentro de este WebView (pagina
+             /embed/player.html del Server), no con un reproductor nativo.
+             Ver el comentario de clase en CameraPlayerPage.xaml.cs para el
+             porque: a diferencia de RTSP directo, WebRTC atraviesa NAT/redes
+             distintas (con STUN/TURN), que es el caso real de uso (celular
+             fuera de la LAN de las camaras). Funciona igual en Android,
+             iOS y Windows: WebView es un control core de MAUI, no hace
+             falta ningun #if por plataforma aca. -->
+        <Grid Grid.Row="1" x:Name="videoHost" BackgroundColor="Black">
+            <WebView x:Name="playerWebView"
+                     Navigating="OnPlayerWebViewNavigating"
+                     HorizontalOptions="Fill"
+                     VerticalOptions="Fill" />
+
+            <ActivityIndicator x:Name="loadingIndicator"
+                                IsRunning="False"
+                                IsVisible="False"
+                                HorizontalOptions="Center"
+                                VerticalOptions="Center"
+                                Color="White" />
+        </Grid>
+
+        <Button x:Name="openInVlcButton" Grid.Row="2" Text="Abrir en VLC (directo, solo en la misma red)" Clicked="OnOpenInVlcClicked" />
+    </Grid>
+
+</ContentPage>
