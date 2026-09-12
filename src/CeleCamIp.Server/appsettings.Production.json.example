@@ -1,0 +1,12 @@
+{
+  "Auth": {
+    "ApiKey": "REEMPLAZAR - debe coincidir EXACTO con Auth:ApiKey del Gateway y AppSecrets.cs de la App"
+  },
+  "IceServers": [
+    {
+      "Urls": "turn:free.expressturn.com:3478",
+      "Username": "REEMPLAZAR - dashboard de expressturn.com",
+      "Credential": "REEMPLAZAR - dashboard de expressturn.com"
+    }
+  ]
+}

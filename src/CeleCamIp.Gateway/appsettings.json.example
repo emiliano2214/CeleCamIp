@@ -1,0 +1,30 @@
+﻿{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "Server": {
+    "HubUrl": "http://camarasip.runasp.net/hubs/gateway"
+  },
+  "Auth": {
+    "ApiKey": "REEMPLAZAR - debe coincidir EXACTO con Auth:ApiKey del Server"
+  },
+  "House": {
+    "Id": "REEMPLAZAR - id unico de esta casa/gateway",
+    "CameraIps": [ "192.168.0.25", "192.168.0.26", "192.168.0.27", "192.168.0.29" ],
+    "CameraUsername": "REEMPLAZAR",
+    "CameraPassword": "REEMPLAZAR"
+  },
+  "IceServers": [
+    {
+      "Urls": "turn:free.expressturn.com:3478",
+      "Username": "REEMPLAZAR - dashboard de expressturn.com",
+      "Credential": "REEMPLAZAR - dashboard de expressturn.com"
+    },
+    {
+      "Urls": "stun:stun.l.google.com:19302"
+    }
+  ]
+}

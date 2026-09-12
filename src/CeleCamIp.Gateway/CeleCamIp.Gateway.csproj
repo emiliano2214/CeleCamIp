@@ -27,17 +27,32 @@
     version mayor, hay que actualizar FFmpegNativeDir a una instalacion de FFmpeg
     con los numeros de DLL que coincidan, o esto va a fallar en silencio (arranca,
     pero SIPSorceryMedia.FFmpeg no puede decodificar nada).
+
+    [FIX PORTABILIDAD] Antes esto tenia el nombre de usuario de Windows
+    hardcodeado (C:\Users\emiab\...), asi que el build fallaba en cualquier
+    otra PC/cuenta sin editar este archivo a mano. $(LOCALAPPDATA) es una
+    variable de entorno estandar de Windows que MSBuild resuelve sola al
+    AppData\Local del usuario que este compilando, sea quien sea - mismo
+    valor final en esta PC, portable en cualquier otra. Se puede pisar desde
+    afuera pasando /p:FFmpegNativeDir=<ruta> a "dotnet build" si alguien usa
+    una instalacion de FFmpeg en otro lado. El target solo corre en Windows
+    (Condition en CopyFFmpegNativeDlls) porque en Docker/Linux este mecanismo
+    no aplica - ahi FFmpeg 8.1 se resuelve dentro del Dockerfile (ver
+    DECISIONES.md D17), no copiando DLLs de una instalacion local.
   -->
-  <PropertyGroup>
-    <FFmpegNativeDir>C:\Users\emiab\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Shared_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build-shared\bin</FFmpegNativeDir>
+  <PropertyGroup Condition="'$(FFmpegNativeDir)' == ''">
+    <FFmpegNativeDir>$(LOCALAPPDATA)\Microsoft\WinGet\Packages\Gyan.FFmpeg.Shared_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build-shared\bin</FFmpegNativeDir>
   </PropertyGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT' AND Exists('$(FFmpegNativeDir)')">
     <FFmpegNativeDlls Include="$(FFmpegNativeDir)\av*.dll;$(FFmpegNativeDir)\sw*.dll" />
   </ItemGroup>
 
-  <Target Name="CopyFFmpegNativeDlls" AfterTargets="Build">
-    <Copy SourceFiles="@(FFmpegNativeDlls)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  <Target Name="CopyFFmpegNativeDlls" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT'">
+    <Warning
+      Condition="!Exists('$(FFmpegNativeDir)')"
+      Text="FFmpegNativeDir no existe ($(FFmpegNativeDir)) - las DLLs nativas de FFmpeg no se copiaron. Instala FFmpeg 8.1.x 'full build shared' (ej. winget install Gyan.FFmpeg.Shared) o pasa /p:FFmpegNativeDir=&lt;ruta&gt; con la ubicacion correcta." />
+    <Copy SourceFiles="@(FFmpegNativeDlls)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('$(FFmpegNativeDir)')" />
   </Target>
 
 </Project>

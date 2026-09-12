@@ -1,6 +1,16 @@
-﻿**/bin/
+**/bin/
 **/obj/
 publish/
 *.user
 gateway_log.txt
 .vs/
+
+# ----------------------------------------------------------------
+# Secretos - NUNCA versionar. Cada uno tiene un ".example" al lado
+# con placeholders, que SI queda trackeado como referencia/plantilla.
+# Ver DECISIONES.md D19 para el razonamiento completo.
+# ----------------------------------------------------------------
+src/CeleCamIp.Gateway/appsettings.json
+src/CeleCamIp.Server/appsettings.Production.json
+src/CeleCamIp.App/Services/AppSecrets.cs
+.env.gateway

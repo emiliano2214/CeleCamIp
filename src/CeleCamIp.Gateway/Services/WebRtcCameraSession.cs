@@ -1,8 +1,6 @@
-using CeleCamIp.Shared.WebRtc;
+﻿using CeleCamIp.Shared.WebRtc;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-using SIPSorceryMedia.FFmpeg;
-using System.Diagnostics;
 using System.Reflection;
 
 namespace CeleCamIp.Gateway.Services;
@@ -13,28 +11,12 @@ namespace CeleCamIp.Gateway.Services;
 /// viewer solo responde con su answer SDP.
 ///
 /// El video sale de FFmpeg leyendo directamente la URL RTSP de la camara
-/// (SIPSorceryMedia.FFmpeg delega en libav/ffmpeg, que sabe hablar RTSP
-/// nativamente). Las muestras ya codificadas (H264) que entrega FFmpeg se
-/// mandan tal cual por RTP via RTCPeerConnection.SendVideo: no hay
-/// transcodificacion adicional de nuestro lado.
-///
-/// IMPORTANTE: antes de usar esta clase hay que haber llamado una sola vez
-/// SIPSorceryMedia.FFmpeg.FFmpegInit.EnsureBinariesRegistered() en el arranque
-/// del proceso (se hace en Program.cs), o FFmpegFileSource no va a poder
-/// cargar las librerias nativas de ffmpeg.
-///
-/// NOTA sobre diagnostico: SIPSorcery 10.0.16 no expone ninguna API publica
-/// para conectar su logging interno (ICE/STUN/TURN/DTLS) a Microsoft.Extensions.Logging
-/// (se verifico por reflexion, no existe SIPSorcery.LogFactory en esta version).
-/// Por eso esta clase expone sus propios eventos de diagnostico
-/// (OnLocalIceCandidate, OnConnectionStateChanged) para que quien la use
-/// pueda loguear lo que esta pasando del lado ICE - es la unica ventana que
-/// tenemos a ese proceso sin logging interno de la libreria.
+/// usando FFmpeg como proceso externo (workaround para el bug de SIPSorceryMedia.FFmpeg).
 /// </summary>
 public sealed class WebRtcCameraSession : IAsyncDisposable
 {
     private readonly RTCPeerConnection _peerConnection;
-    private readonly FFmpegFileSource _videoSource;
+    private readonly FFmpegProcessSource _videoSource;
     private readonly DateTime _creationTime;
     private int _frameCount;
     private bool _firstFrameCaptured;
@@ -74,12 +56,12 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
     public event Action<int>? OnBitrateUpdated;
 
     /// <summary>Se dispara cuando se envía un frame por RTP.</summary>
-    public event Action<int, int>? OnFrameSent; // frameCount, bytes
+    public event Action<int, int>? OnFrameSent;
 
     /// <summary>Se dispara cuando hay un error en FFmpeg.</summary>
     public event Action<string>? OnFFmpegError;
 
-    private WebRtcCameraSession(string viewerConnectionId, string cameraId, RTCPeerConnection peerConnection, FFmpegFileSource videoSource, ILogger? logger = null)
+    private WebRtcCameraSession(string viewerConnectionId, string cameraId, RTCPeerConnection peerConnection, FFmpegProcessSource videoSource, ILogger? logger = null)
     {
         ViewerConnectionId = viewerConnectionId;
         CameraId = cameraId;
@@ -95,81 +77,47 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
     }
 
     /// <summary>
-    /// Obtiene información del formato de video usando reflexión.
+    /// Crea el formato de video H264 que se anuncia en el SDP.
+    ///
+    /// OJO: la firma real de VideoFormat (confirmada via reflexion sobre
+    /// SIPSorceryMedia.Abstractions 10.0.16) es:
+    ///   VideoFormat(VideoCodecsEnum codec, int formatID, int clockRate, string parameters)
+    /// El parametro "parameters" es la linea fmtp del SDP (ej. packetization-mode,
+    /// profile-level-id). Sin eso, el navegador rechaza el SDP con
+    /// "Failed to parse codecs correctly" porque H264 requiere esos atributos
+    /// para poder negociar el formato. La version anterior probaba varios
+    /// constructores por reflexion "a ciegas" y ninguno seteaba este parametro.
+    ///
+    /// 96 es un payload type dinamico valido (rango 96-127) para H264.
+    /// packetization-mode=1 = non-interleaved (el modo mas soportado).
+    /// profile-level-id=42e01f = Baseline Profile, Level 3.1 (compatible con
+    /// la gran mayoria de camaras IP y navegadores). Como FFmpeg usa "-c:v copy"
+    /// (no re-codifica), el profile real de la camara puede diferir del anunciado;
+    /// level-asymmetry-allowed=1 le dice al navegador que igual acepte streams
+    /// con un profile/level distinto al declarado.
     /// </summary>
-    private static string GetFormatInfo(VideoFormat format)
+    private static List<VideoFormat> CreateH264Formats()
     {
-        try
-        {
-            var props = format.GetType().GetProperties();
-            var info = new List<string>();
-            foreach (var prop in props)
-            {
-                try
-                {
-                    var value = prop.GetValue(format);
-                    if (value != null)
-                    {
-                        info.Add($"{prop.Name}={value}");
-                    }
-                }
-                catch { }
-            }
-            return string.Join(", ", info);
-        }
-        catch
-        {
-            return format.ToString() ?? "Unknown";
-        }
+        const int h264DynamicPayloadType = 96;
+        const int h264ClockRate = 90000;
+        const string h264FmtpParameters =
+            "packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1";
+
+        var format = new VideoFormat(
+            VideoCodecsEnum.H264,
+            h264DynamicPayloadType,
+            h264ClockRate,
+            h264FmtpParameters);
+
+        Console.WriteLine($"[WebRTC] ✅ H264 creado: PT={h264DynamicPayloadType}, ClockRate={h264ClockRate}, Fmtp=\"{h264FmtpParameters}\"");
+
+        return new List<VideoFormat> { format };
     }
 
-    /// <summary>
-    /// Verifica si un formato es H264 usando reflexión.
-    /// </summary>
-    private static bool IsH264Format(VideoFormat format)
-    {
-        try
-        {
-            // Intentar obtener CodecName
-            var codecNameProp = format.GetType().GetProperty("CodecName");
-            if (codecNameProp != null)
-            {
-                var codecName = codecNameProp.GetValue(format) as string;
-                if (!string.IsNullOrEmpty(codecName) &&
-                    (codecName.Contains("264") || codecName.Contains("h264")))
-                {
-                    return true;
-                }
-            }
-
-            // Intentar obtener Codec
-            var codecProp = format.GetType().GetProperty("Codec");
-            if (codecProp != null)
-            {
-                var codec = codecProp.GetValue(format);
-                if (codec != null)
-                {
-                    var codecStr = codec.ToString();
-                    if (!string.IsNullOrEmpty(codecStr) &&
-                        (codecStr.Contains("264") || codecStr.Contains("h264")))
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
     /// <summary>
     /// Arma la sesion completa: fuente de video FFmpeg apuntando al RTSP de la
-    /// camara, RTCPeerConnection con los ICE servers configurados (ExpressTURN
-    /// incluido) y la oferta SDP lista para mandar al viewer.
+    /// camara, RTCPeerConnection con los ICE servers configurados y la oferta SDP.
     /// </summary>
     public static async Task<(WebRtcCameraSession Session, SdpDescriptionDto Offer)> CreateAsync(
         string viewerConnectionId,
@@ -183,40 +131,23 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
         Console.WriteLine($"[WebRTC] Creando sesión para Viewer={viewerConnectionId}, Camera={cameraId}");
         Console.WriteLine($"[WebRTC] Stream URL: {rtspStreamUrl}");
 
-        // repeat=true: si ffmpeg pierde el stream (ej: la camara cortó un instante),
-        // reintenta en vez de terminar la sesion. audioEncoder=null y audioFrameSize=0
-        // porque por ahora solo mandamos video. useVideo=true.
-        var videoSource = new FFmpegFileSource(rtspStreamUrl, true, null!, 0, true);
+        // ============================================================
+        // USAR FFmpegProcessSource EN VEZ DE FFmpegFileSource
+        // ============================================================
+        var videoSource = new FFmpegProcessSource(rtspStreamUrl, logger);
 
-        // Obtener formatos de video con diagnóstico
-        logger?.LogInformation("[WebRTC] Obteniendo formatos de video...");
-        Console.WriteLine("[WebRTC] Obteniendo formatos de video...");
-        var videoFormats = videoSource.GetVideoSourceFormats();
+        // Crear formatos H264 manualmente
+        var videoFormats = CreateH264Formats();
 
         if (videoFormats == null || videoFormats.Count == 0)
         {
-            logger?.LogError("[WebRTC] ❌ No se encontraron formatos de video");
-            Console.WriteLine("[WebRTC] ❌ No se encontraron formatos de video");
-            throw new InvalidOperationException("No se encontraron formatos de video para el stream RTSP");
+            logger?.LogError("[WebRTC] ❌ No se pudieron crear formatos de video H264");
+            Console.WriteLine("[WebRTC] ❌ No se pudieron crear formatos de video H264");
+            throw new InvalidOperationException("No se pudieron crear formatos de video H264");
         }
 
-        logger?.LogInformation($"[WebRTC] ✅ {videoFormats.Count} formato(s) encontrado(s)");
-        Console.WriteLine($"[WebRTC] ✅ {videoFormats.Count} formato(s) encontrado(s)");
-        foreach (var format in videoFormats)
-        {
-            try
-            {
-                var info = GetFormatInfo(format);
-                var isH264 = IsH264Format(format);
-                logger?.LogInformation($"[WebRTC]   - Formato: {info} {(isH264 ? "✅ H264" : "")}");
-                Console.WriteLine($"[WebRTC]   - Formato: {info} {(isH264 ? "✅ H264" : "")}");
-            }
-            catch (Exception ex)
-            {
-                logger?.LogWarning($"[WebRTC]   - Error obteniendo info del formato: {ex.Message}");
-                Console.WriteLine($"[WebRTC]   - Error obteniendo info del formato: {ex.Message}");
-            }
-        }
+        logger?.LogInformation($"[WebRTC] ✅ {videoFormats.Count} formato(s) H264 creado(s)");
+        Console.WriteLine($"[WebRTC] ✅ {videoFormats.Count} formato(s) H264 creado(s)");
 
         // Configurar ICE
         logger?.LogInformation($"[WebRTC] Configurando ICE con {iceServers.Count} servidores...");
@@ -240,32 +171,11 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
             session.OnFFmpegError?.Invoke(error);
         };
 
-        // Nota: OnVideoSourceInfo no existe en todas las versiones, lo manejamos con try-catch
-        try
-        {
-            // Intentar suscribir el evento si existe (usando reflexión)
-            var eventInfo = videoSource.GetType().GetEvent("OnVideoSourceInfo");
-            if (eventInfo != null)
-            {
-                var handler = new Action<string>(info =>
-                {
-                    logger?.LogInformation($"[WebRTC] ℹ️ FFmpeg Info: {info}");
-                    Console.WriteLine($"[WebRTC] ℹ️ FFmpeg Info: {info}");
-                });
-                eventInfo.AddEventHandler(videoSource, handler);
-            }
-        }
-        catch
-        {
-            // El evento no existe, ignorar
-        }
-
         // Cada muestra H264 ya codificada que entrega ffmpeg se manda directo por RTP.
         videoSource.OnVideoSourceEncodedSample += (durationRtpUnits, sample) =>
         {
             lock (session._lock)
             {
-                // Contar frames y capturar el primero
                 session._frameCount++;
                 session._totalBytesSent += sample.Length;
 
@@ -279,14 +189,12 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                     session.OnFirstFrameElapsed?.Invoke(elapsed);
                 }
 
-                // Log cada 25 frames
                 if (session._frameCount % 25 == 0)
                 {
                     logger?.LogInformation($"[WebRTC] 📹 Frames enviados: {session._frameCount} para cámara {cameraId}");
                     Console.WriteLine($"[WebRTC] 📹 Frames enviados: {session._frameCount} para cámara {cameraId}");
                 }
 
-                // Calcular bitrate cada 50 frames
                 if (session._frameCount % 50 == 0)
                 {
                     var now = DateTime.UtcNow;
@@ -307,11 +215,9 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                     session._lastFrameCountForBitrate = session._frameCount;
                 }
 
-                // Disparar eventos
                 session.OnFrameEncoded?.Invoke(session._frameCount);
                 session.OnFrameSent?.Invoke(session._frameCount, sample.Length);
 
-                // Enviar el frame por RTP
                 try
                 {
                     peerConnection.SendVideo(durationRtpUnits, sample);
@@ -323,6 +229,30 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                 }
             }
         };
+
+        // [FIX LATENCIA/TIMEOUT] Arrancar FFmpeg YA, en paralelo a la negociacion ICE,
+        // en vez de esperar a que la RTCPeerConnection llegue a "connected". Antes,
+        // toda la demora de conectar al RTSP + esperar el primer keyframe se sumaba
+        // DESPUES de terminar la negociacion ICE (que ya de por si puede tardar
+        // segundos si hay TURN de por medio). Si el ICE nunca llegaba a "connected"
+        // (por la latencia extra de relayar por un TURN lejano, por ejemplo), la
+        // sesion se cerraba sin haber arrancado FFmpeg ni una sola vez. Arrancando
+        // ya mismo, FFmpeg tiene tiempo de conectar al RTSP y tener frames listos
+        // MIENTRAS el ICE todavia esta negociando.
+        try
+        {
+            await videoSource.StartVideo();
+            logger?.LogInformation("[WebRTC] ✅ FFmpeg arrancado (en paralelo a la negociación ICE)");
+            Console.WriteLine("[WebRTC] ✅ FFmpeg arrancado (en paralelo a la negociación ICE)");
+            session.OnVideoStartFailed?.Invoke(null);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError($"[WebRTC] ❌ Error iniciando video: {ex.Message}");
+            Console.WriteLine($"[WebRTC] ❌ Error iniciando video: {ex.Message}");
+            session.OnVideoStartFailed?.Invoke(ex);
+            throw;
+        }
 
         peerConnection.onicecandidate += candidate =>
         {
@@ -344,7 +274,7 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                 candidate.candidate, candidate.sdpMid, candidate.sdpMLineIndex, candidate.usernameFragment));
         };
 
-        peerConnection.onconnectionstatechange += async state =>
+        peerConnection.onconnectionstatechange += state =>
         {
             logger?.LogInformation($"[WebRTC] Connection State: {state}");
             Console.WriteLine($"[WebRTC] Connection State: {state}");
@@ -353,24 +283,10 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
             switch (state)
             {
                 case RTCPeerConnectionState.connected:
-                    // Recien arrancamos a mandar frames cuando el DTLS/ICE ya cerro:
-                    // antes de eso SendVideo no tiene a donde mandar los paquetes.
-                    logger?.LogInformation("[WebRTC] Conexión establecida, iniciando video...");
-                    Console.WriteLine("[WebRTC] Conexión establecida, iniciando video...");
-                    try
-                    {
-                        await videoSource.StartVideo();
-                        logger?.LogInformation("[WebRTC] ✅ Video iniciado correctamente");
-                        Console.WriteLine("[WebRTC] ✅ Video iniciado correctamente");
-                        session.OnVideoStartFailed?.Invoke(null);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger?.LogError($"[WebRTC] ❌ Error iniciando video: {ex.Message}");
-                        Console.WriteLine($"[WebRTC] ❌ Error iniciando video: {ex.Message}");
-                        session.OnVideoStartFailed?.Invoke(ex);
-                        throw;
-                    }
+                    // El video ya se arranco antes (en paralelo a la negociacion ICE,
+                    // ver comentario mas arriba); aca solo queda loguear el estado.
+                    logger?.LogInformation("[WebRTC] Conexión establecida (video ya iniciado en paralelo)");
+                    Console.WriteLine("[WebRTC] Conexión establecida (video ya iniciado en paralelo)");
                     break;
                 case RTCPeerConnectionState.closed:
                 case RTCPeerConnectionState.failed:

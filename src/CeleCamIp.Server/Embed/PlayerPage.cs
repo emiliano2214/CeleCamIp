@@ -1,29 +1,5 @@
-namespace CeleCamIp.Server.Embed;
+﻿namespace CeleCamIp.Server.Embed;
 
-/// <summary>
-/// HTML/JS de un reproductor WebRTC de UNA sola camara, pensado para vivir
-/// dentro de un WebView nativo (la app MAUI) en vez de un navegador de
-/// escritorio. Es una version reducida de wwwroot/index.html (el viewer de
-/// prueba): misma logica de senializacion (JoinAsViewer -> RequestStream ->
-/// ReceiveOffer/answer -> trickle ICE), pero:
-///
-///   - Sin lista de casas/camaras: houseId y cameraId llegan por query string
-///     (?houseId=...&cameraId=...&token=...), la app arma esa URL.
-///   - Sin prompt() de API key: llega tambien por query string (la misma que
-///     usa la app para autenticarse contra el Hub).
-///   - Los ICE servers (incluido el TURN real) los pide a /api/ice-servers
-///     en vez de tenerlos hardcodeados, para no duplicar el secreto en dos
-///     lugares del codigo fuente.
-///   - Reporta su estado (connecting/connected/error) al host nativo
-///     navegando a una URL con esquema "app://status?...". CameraPlayerPage.xaml.cs
-///     intercepta esa navegacion en el evento Navigating del WebView y la
-///     cancela antes de que efectivamente navegue, asi nunca se pierde la
-///     pagina/JS en ejecucion. Es el truco estandar para mandar eventos de
-///     JS a codigo nativo en un WebView de MAUI sin HybridWebView.
-///
-/// Servida SIEMPRE (cualquier ambiente) en GET /embed/player.html, a
-/// diferencia de wwwroot/index.html que solo se sirve en Development.
-/// </summary>
 public static class PlayerPage
 {
     public const string Html = """
@@ -33,142 +9,296 @@ public static class PlayerPage
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>CeleCamIp - Player</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js">
+    </script>
     <style>
-      html, body { margin:0; padding:0; background:#000; height:100%; width:100%; overflow:hidden; }
-      video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { background: #0a0a0a; height: 100%; width: 100%; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+      video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+      
+      #log-container {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0,0,0,0.85);
+        backdrop-filter: blur(10px);
+        padding: 16px 24px;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.08);
+        min-width: 280px;
+        max-width: 92%;
+        text-align: center;
+        pointer-events: none;
+        font-size: 13px;
+        color: #aaa;
+        font-family: monospace;
+        max-height: 200px;
+        overflow-y: auto;
+      }
+      #log-container .log-connecting { color: #ffd43b; }
+      #log-container .log-connected { color: #51cf66; }
+      #log-container .log-error { color: #ff6b6b; }
+      #log-container .log-info { color: #74c0fc; }
+      
+      #debug {
+        position: absolute;
+        top: 10px;
+        right: 12px;
+        color: rgba(255,255,255,0.15);
+        font-size: 9px;
+        font-family: monospace;
+        text-align: right;
+        pointer-events: none;
+        line-height: 1.6;
+      }
+      
+      .spinner {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(255,255,255,0.1);
+        border-top-color: #ffd43b;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin-right: 10px;
+        vertical-align: middle;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
     </style>
     </head>
     <body>
       <video id="video" autoplay playsinline muted></video>
+      
+      <div id="log-container">
+        <span class="spinner" id="spinner"></span>
+        <span id="log-text">Iniciando...</span>
+        <div id="log-detail" style="font-size:11px;color:#666;margin-top:4px;"></div>
+      </div>
+      
+      <div id="debug"></div>
 
-    <script>
-    // ===================== Parametros de la URL =====================
-    const params = new URLSearchParams(window.location.search);
-    const houseId = params.get('houseId');
-    const cameraId = params.get('cameraId');
-    const token = params.get('token');
+      <script>
+        // ============================================================
+        // ELEMENTOS
+        // ============================================================
+        var videoEl = document.getElementById('video');
+        var logText = document.getElementById('log-text');
+        var logDetail = document.getElementById('log-detail');
+        var spinner = document.getElementById('spinner');
+        var debugEl = document.getElementById('debug');
 
-    const videoEl = document.getElementById('video');
-
-    // ===================== Puente hacia el host nativo =====================
-    // Ver el comentario de clase (PlayerPage.cs) sobre por que se usa
-    // window.location en vez de un mecanismo mas directo.
-    function notifyNative(state, message) {
-      try {
-        window.location.href = 'app://status?state=' + encodeURIComponent(state) +
-          '&message=' + encodeURIComponent(message || '');
-      } catch (e) {
-        // Si falla (ej: se esta ejecutando suelto en un navegador de escritorio
-        // para debug, sin un WebView nativo escuchando), no es un error real.
-      }
-    }
-
-    if (!houseId || !cameraId || !token) {
-      notifyNative('error', 'Faltan parametros (houseId/cameraId/token) en la URL del player.');
-    } else {
-      main();
-    }
-
-    let pc = null;
-
-    async function main() {
-      notifyNative('connecting', '');
-
-      let iceServers;
-      try {
-        const resp = await fetch('/api/ice-servers?access_token=' + encodeURIComponent(token));
-        if (!resp.ok) {
-          throw new Error('HTTP ' + resp.status);
+        // ============================================================
+        // LOGGING
+        // ============================================================
+        function log(message, type, detail) {
+          logText.textContent = message;
+          logText.className = 'log-' + (type || 'info');
+          if (detail) logDetail.textContent = detail;
+          else logDetail.textContent = '';
+          console.log('[Player]', message, detail || '');
         }
-        const servers = await resp.json();
-        iceServers = servers.map(s => ({
-          urls: s.urls,
-          username: s.username || undefined,
-          credential: s.credential || undefined
-        }));
-      } catch (e) {
-        notifyNative('error', 'No se pudo obtener la configuracion ICE del servidor: ' + e.message);
-        return;
-      }
 
-      const connection = new signalR.HubConnectionBuilder()
-        .withUrl('/hubs/gateway', { accessTokenFactory: () => token })
-        .withAutomaticReconnect()
-        .build();
-
-      connection.on('ReceiveOffer', async (camId, offer) => {
-        if (camId !== cameraId || !pc) {
-          return;
+        function setDebug(text) {
+          debugEl.textContent = text;
         }
-        await pc.setRemoteDescription({ type: offer.type, sdp: offer.sdp });
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        await connection.invoke('SendAnswer', houseId, cameraId, { type: answer.type, sdp: answer.sdp });
-      });
 
-      connection.on('ReceiveIceCandidate', async (camId, candidate) => {
-        if (camId !== cameraId || !pc) {
-          return;
+        // ============================================================
+        // PARÁMETROS
+        // ============================================================
+        // OJO: URLSearchParams decodifica '+' como espacio (regla de
+        // application/x-www-form-urlencoded). Como el token es una API key
+        // en base64 y puede contener '+', si alguien pega la URL a mano sin
+        // escaparlo bien (%2B), el token llegaria corrupto y el servidor
+        // devolveria 401 aunque la key sea correcta. Por eso neutralizamos
+        // cualquier '+' literal en la query ANTES de parsear.
+        var params = new URLSearchParams(window.location.search.replace(/\+/g, '%2B'));
+        var houseId = params.get('houseId');
+        var cameraId = params.get('cameraId');
+        var token = params.get('token');
+
+        setDebug('H:' + (houseId || '?') + ' | C:' + (cameraId || '?') + ' | T:' + (token ? '✅' : '❌'));
+
+        console.log('=== CeleCamIp Player ===');
+        console.log('houseId:', houseId);
+        console.log('cameraId:', cameraId);
+        console.log('token:', token ? 'PRESENTE' : 'NO TOKEN');
+
+        // ============================================================
+        // VALIDACIÓN - TODO DENTRO DE main()
+        // ============================================================
+        var pc = null;
+        var connection = null;
+
+        // [FIX] Puente JS -> nativo: la app MAUI (CameraPlayerPage.xaml.cs) escucha
+        // navegaciones a "app://status?state=...&message=..." para mostrar/ocultar
+        // el loading y los alerts de error. Antes esta funcion no existia y esa
+        // navegacion nunca se disparaba, asi que el spinner nativo quedaba
+        // colgado para siempre y los errores nunca llegaban a mostrarse como
+        // alert nativo (solo quedaban en el log de texto adentro del WebView).
+        function notifyNativeStatus(state, message) {
+          try {
+            var url = 'app://status?state=' + encodeURIComponent(state) +
+              (message ? '&message=' + encodeURIComponent(message) : '');
+            window.location.href = url;
+          } catch (e) { /* si no corre dentro de un WebView nativo, ignorar */ }
         }
-        try {
-          await pc.addIceCandidate({
-            candidate: candidate.candidate,
-            sdpMid: candidate.sdpMid,
-            sdpMLineIndex: candidate.sdpMLineIndex,
-            usernameFragment: candidate.usernameFragment
-          });
-        } catch (e) {
-          // Un candidato individual que falla no es fatal; pueden llegar varios.
+
+        function startPlayer() {
+          notifyNativeStatus('connecting');
+          // Validar parámetros
+          if (!houseId) {
+            log('❌ Falta: houseId', 'error', 'Agrega &houseId=xxx a la URL');
+            notifyNativeStatus('error', 'Falta houseId');
+            return;
+          }
+          if (!cameraId) {
+            log('❌ Falta: cameraId', 'error', 'Agrega &cameraId=xxx a la URL');
+            notifyNativeStatus('error', 'Falta cameraId');
+            return;
+          }
+          if (!token) {
+            log('❌ Falta: token', 'error', 'Agrega &token=xxx a la URL');
+            notifyNativeStatus('error', 'Falta token');
+            return;
+          }
+
+          log('Conectando al servidor...', 'connecting');
+          main();
         }
-      });
 
-      connection.on('StreamError', (a, b) => {
-        // Puede llegar como (houseId, cameraId, reason) o (cameraId, reason) segun el origen.
-        const reason = b !== undefined ? b : a;
-        notifyNative('error', 'El servidor reporto un error de stream: ' + reason);
-      });
+        // ============================================================
+        // FUNCIÓN PRINCIPAL
+        // ============================================================
+        async function main() {
+          try {
+            // 1. OBTENER ICE SERVERS
+            log('Obteniendo ICE servers...', 'connecting');
+            console.log('📡 Fetching ICE from: /api/ice-servers?access_token=' + (token ? token.substring(0, 10) + '...' : 'NO TOKEN'));
 
-      connection.onreconnecting(() => notifyNative('connecting', 'Reconectando con el servidor...'));
+            var resp = await fetch('/api/ice-servers?access_token=' + encodeURIComponent(token));
+            console.log('📡 Response status:', resp.status);
 
-      try {
-        await connection.start();
-      } catch (e) {
-        notifyNative('error', 'No se pudo conectar al servidor: ' + e.message);
-        return;
-      }
+            if (!resp.ok) {
+              throw new Error('HTTP ' + resp.status + ' - ' + resp.statusText);
+            }
 
-      pc = new RTCPeerConnection({ iceServers });
+            var iceServers = await resp.json();
+            console.log('✅ ICE servers:', iceServers);
+            log('ICE servers obtenidos (' + iceServers.length + ')', 'info', 'Usando ' + iceServers.length + ' servidores');
 
-      pc.ontrack = (event) => {
-        videoEl.srcObject = event.streams[0];
-        notifyNative('connected', '');
-      };
+            // 2. CONECTAR AL HUB
+            log('Conectando al Hub...', 'connecting');
+            console.log('📡 Connecting to /hubs/gateway');
 
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          connection.invoke('SendIceCandidateToGateway', houseId, cameraId, {
-            candidate: event.candidate.candidate,
-            sdpMid: event.candidate.sdpMid,
-            sdpMLineIndex: event.candidate.sdpMLineIndex,
-            usernameFragment: event.candidate.usernameFragment
-          }).catch(() => {});
+            connection = new signalR.HubConnectionBuilder()
+              .withUrl('/hubs/gateway', { accessTokenFactory: function() { return token; } })
+              .withAutomaticReconnect()
+              .build();
+
+            // HANDLERS
+            connection.on('ReceiveOffer', async function(camId, offer) {
+              console.log('📩 Offer recibido para:', camId);
+              log('Offer recibido', 'info', 'Cámara: ' + camId);
+              if (camId !== cameraId || !pc) return;
+
+              try {
+                await pc.setRemoteDescription({ type: offer.type, sdp: offer.sdp });
+                var answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                await connection.invoke('SendAnswer', houseId, cameraId, { type: answer.type, sdp: answer.sdp });
+                log('Answer enviado', 'info', 'Esperando video...');
+              } catch (e) {
+                log('Error en ReceiveOffer: ' + e.message, 'error');
+              }
+            });
+
+            connection.on('ReceiveIceCandidate', async function(camId, candidate) {
+              if (camId !== cameraId || !pc) return;
+              try {
+                await pc.addIceCandidate({
+                  candidate: candidate.candidate,
+                  sdpMid: candidate.sdpMid,
+                  sdpMLineIndex: candidate.sdpMLineIndex,
+                  usernameFragment: candidate.usernameFragment
+                });
+              } catch (e) { /* ignorar */ }
+            });
+
+            connection.on('StreamError', function(a, b) {
+              var reason = b !== undefined ? b : a;
+              log('❌ Error: ' + reason, 'error');
+            });
+
+            connection.onreconnecting(function() { log('Reconectando...', 'connecting'); });
+            connection.onreconnected(function() { log('Reconectado', 'connected'); });
+
+            await connection.start();
+            console.log('✅ Conectado al Hub');
+            log('Conectado al Hub', 'connected');
+
+            // 3. CREAR PEER CONNECTION
+            log('Creando PeerConnection...', 'connecting');
+            pc = new RTCPeerConnection({ iceServers: iceServers });
+
+            pc.ontrack = function(event) {
+              console.log('📹 Track recibido:', event.track.kind);
+              if (event.track.kind === 'video') {
+                videoEl.srcObject = event.streams[0];
+                log('▶️ Reproduciendo', 'connected');
+                notifyNativeStatus('connected');
+              }
+            };
+
+            pc.onicecandidate = function(event) {
+              if (event.candidate) {
+                connection.invoke('SendIceCandidateToGateway', houseId, cameraId, {
+                  candidate: event.candidate.candidate,
+                  sdpMid: event.candidate.sdpMid,
+                  sdpMLineIndex: event.candidate.sdpMLineIndex,
+                  usernameFragment: event.candidate.usernameFragment
+                }).catch(function() {});
+              }
+            };
+
+            pc.onconnectionstatechange = function() {
+              console.log('Connection state:', pc.connectionState);
+              if (pc.connectionState === 'connected') {
+                log('✅ Video conectado', 'connected');
+              } else if (pc.connectionState === 'failed') {
+                log('❌ Conexión ICE falló', 'error', 'Verifica STUN/TURN');
+                notifyNativeStatus('error', 'No se pudo establecer la conexión (ICE falló).');
+              } else if (pc.connectionState === 'disconnected') {
+                notifyNativeStatus('error', 'Se perdió la conexión con la cámara.');
+              }
+            };
+
+            // 4. SOLICITAR STREAM
+            log('Solicitando stream...', 'connecting');
+            console.log('📡 Invoke RequestStream:', houseId, cameraId);
+            await connection.invoke('RequestStream', houseId, cameraId);
+            log('Stream solicitado', 'info', 'Esperando oferta...');
+
+          } catch (e) {
+            console.error('❌ ERROR:', e);
+            log('❌ Error: ' + e.message, 'error', e.stack || '');
+            notifyNativeStatus('error', e.message);
+          }
         }
-      };
 
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
-          notifyNative('error', 'Se perdio la conexion de video (' + pc.connectionState + ').');
-        }
-      };
+        // ============================================================
+        // INICIAR
+        // ============================================================
+        startPlayer();
 
-      try {
-        await connection.invoke('RequestStream', houseId, cameraId);
-      } catch (e) {
-        notifyNative('error', 'No se pudo pedir el stream: ' + e.message);
-      }
-    }
-    </script>
+        // ============================================================
+        // LIMPIEZA
+        // ============================================================
+        window.onbeforeunload = function() {
+          if (pc) { pc.close(); pc = null; }
+          if (connection) { connection.stop(); connection = null; }
+        };
+      </script>
     </body>
     </html>
     """;

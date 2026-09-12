@@ -99,7 +99,7 @@ public partial class CameraPlayerPage : ContentPage
         // "about:blank" descarga la pagina actual (y con ella el JS en
         // ejecucion), lo que cierra la RTCPeerConnection y la conexion
         // SignalR del lado del WebView. Sin esto, el video seguiria
-        // consumiendo datos/batería en segundo plano al salir de la pantalla.
+        // consumiendo datos/baterÃ­a en segundo plano al salir de la pantalla.
         playerWebView.Source = "about:blank";
     }
 

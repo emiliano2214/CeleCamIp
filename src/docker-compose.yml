@@ -1,0 +1,33 @@
+services:
+
+  # ============================================================
+  # CeleCamIp
+  # ============================================================
+
+  celecamip-gateway:
+    container_name: celecamip-gateway
+    build:
+      context: .
+      dockerfile: CeleCamIp.Gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+    networks:
+      - celecamip
+
+  # ============================================================
+  # FUTUROS SERVICIOS DE CeleCamIp
+  # ============================================================
+  # celecamip-otro-servicio:
+  #   container_name: celecamip-otro-servicio
+  #   build:
+  #     context: .
+  #     dockerfile: OtroProyecto/Dockerfile
+  #   restart: unless-stopped
+  #   networks:
+  #     - celecamip
+
+networks:
+  celecamip:
+    name: celecamip
+    driver: bridge

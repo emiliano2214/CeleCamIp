@@ -1,8 +1,8 @@
-﻿services:
+services:
   gateway:
     build:
       context: .
-      dockerfile: Dockerfile.gateway
+      dockerfile: CeleCamIp.Gateway/Dockerfile
     container_name: celecamip-gateway
     restart: unless-stopped
 
@@ -13,17 +13,17 @@
 
     environment:
       # --- Server (Hub central) ---
-      - Server__HubUrl=${SERVER_HUB_URL:-http://localhost:5151/hubs/gateway}
+      - Server__HubUrl=${SERVER_HUB_URL}
       - Auth__ApiKey=${AUTH_API_KEY}
 
       # --- Identidad de esta casa ---
-      - House__Id=${HOUSE_ID:-casa-dev-01}
-      - House__CameraIps__0=${CAMERA_IP_1:-192.168.0.25}
-      - House__CameraIps__1=${CAMERA_IP_2:-192.168.0.26}
-      - House__CameraIps__2=${CAMERA_IP_3:-192.168.0.27}
-      - House__CameraIps__3=${CAMERA_IP_4:-192.168.0.29}
-      - House__CameraUsername=${CAMERA_USERNAME:-admin}
-      - House__CameraPassword=${CAMERA_PASSWORD:-admin}
+      - House__Id=${HOUSE_ID}
+      - House__CameraIps__0=${CAMERA_IP_1}
+      - House__CameraIps__1=${CAMERA_IP_2}
+      - House__CameraIps__2=${CAMERA_IP_3}
+      - House__CameraIps__3=${CAMERA_IP_4}
+      - House__CameraUsername=${CAMERA_USERNAME}
+      - House__CameraPassword=${CAMERA_PASSWORD}
 
       # --- TURN/STUN (WebRTC) ---
       - IceServers__0__Urls=turn:free.expressturn.com:3478

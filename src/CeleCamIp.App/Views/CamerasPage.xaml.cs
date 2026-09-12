@@ -12,7 +12,7 @@ public partial class CamerasPage : ContentPage
 {
     public ObservableCollection<CameraDescriptor> Cameras { get; } = new();
 
-    private string _houseTitle = "C·maras";
+    private string _houseTitle = "C√°maras";
     public string HouseTitle
     {
         get => _houseTitle;
@@ -65,8 +65,8 @@ public partial class CamerasPage : ContentPage
             string.IsNullOrWhiteSpace(camera.StreamUrl))
         {
             await ShowAlertSafeAsync(
-                "Sin stream todavÌa",
-                "Esta c·mara no tiene una URL de video resuelta. Puede que el Gateway todavÌa no haya terminado de detectarla.");
+                "Sin stream todav√≠a",
+                "Esta c√°mara no tiene una URL de video resuelta. Puede que el Gateway todav√≠a no haya terminado de detectarla.");
             return;
         }
 
@@ -87,7 +87,7 @@ public partial class CamerasPage : ContentPage
             // el DisplayAlert llegue a mostrarse.
             Debug.WriteLine($"[CamerasPage] Fallo GoToAsync(CameraPlayerPage): {ex}");
 
-            await ShowAlertSafeAsync("Error de NavegaciÛn", ex.Message);
+            await ShowAlertSafeAsync("Error de Navegaci√≥n", ex.Message);
         }
         finally
         {
