@@ -80,8 +80,24 @@ class Program
 
         var host = builder.Build();
 
+        // [DIAGNOSTICO cierre ~10-20s tras el primer keyframe] SIPSorcery loguea
+        // internamente (packetizacion RTP/FU-A, SRTP, ICE) a traves de su propio
+        // LogFactory estatico, que por defecto no esta conectado a nada - esos
+        // logs se pierden salvo que lo conectemos explicitamente al ILoggerFactory
+        // del host. Sin esto, cualquier warning/error interno de SIPSorcery al
+        // mandar el primer keyframe grande (100-300KB fragmentado) es invisible
+        // para nosotros. Ver tambien "SIPSorcery": "Debug" en appsettings.json,
+        // sin lo cual el nivel de log por defecto (Information) filtraria estos
+        // mensajes igual.
+        SIPSorcery.LogFactory.Set(host.Services.GetRequiredService<ILoggerFactory>());
+
         var logger = host.Services.GetService<ILogger<Program>>();
         logger?.LogInformation("Gateway iniciado correctamente");
+
+        // Debe aplicarse ANTES de host.RunAsync(): pisa campos static de
+        // SIPSorcery que se leen recien cuando se crea la primera
+        // RTCPeerConnection. Ver comentario en IceTimeoutPatch.cs.
+        IceTimeoutPatch.Apply(logger);
 
         Console.WriteLine("\n==========================================");
         Console.WriteLine("  Gateway listo - Esperando conexiones...");

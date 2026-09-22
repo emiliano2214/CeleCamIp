@@ -1,91 +1,170 @@
-﻿using CeleCamIp.Shared.Cameras;
-using CeleCamIp.Shared.Cameras.Adapters;
+using CeleCamIp.CameraDiagnostic.Text;
+using CeleCamIp.CameraDiagnostic.Text.DVRIP;
+using CeleCamIp.CameraDiagnostic.Text.PTZ;
+using CeleCamIp.CameraDiagnostic.Text.RTSP;
+using CeleCamIp.Shared.Cameras;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
 Console.WriteLine("=================================================");
-Console.WriteLine(" CeleCamIp - Diagnostico de camara");
-Console.WriteLine(" Prueba si la camara responde RTSP y con que ruta");
+Console.WriteLine(" CeleCamIp - Diagnostico de camara (RTSP/DVRIP/PTZ)");
 Console.WriteLine("=================================================");
 Console.WriteLine();
 
 Console.Write("IP de la camara (ej: 192.168.1.50): ");
 var ip = Console.ReadLine()?.Trim() ?? "";
 
-Console.Write("Usuario (Enter para dejar vacio): ");
-var user = Console.ReadLine()?.Trim();
-
-Console.Write("Contraseña (Enter para dejar vacio): ");
-var pass = Console.ReadLine()?.Trim();
-
 if (string.IsNullOrWhiteSpace(ip))
 {
     Console.WriteLine();
     Console.WriteLine("No se ingreso una IP. Cerrando.");
+    return;
 }
-else
+
+// Las credenciales de RTSP/ONVIF y de DVRIP suelen ser distintas en estas
+// camaras (usuarios y/o passwords diferentes para cada protocolo), asi que
+// se piden por separado y cada prueba usa el descriptor que corresponde.
+Console.WriteLine();
+Console.WriteLine("-- Credenciales RTSP / ONVIF --");
+Console.Write("Usuario RTSP (Enter para dejar vacio): ");
+var usuarioRtsp = Console.ReadLine()?.Trim();
+Console.Write("Contraseña RTSP (Enter para dejar vacio): ");
+var passwordRtsp = Console.ReadLine()?.Trim();
+
+Console.WriteLine();
+Console.WriteLine("-- Credenciales DVRIP (protocolo propietario, puerto 34567) --");
+Console.Write("Usuario DVRIP (Enter para dejar vacio): ");
+var usuarioDvrip = Console.ReadLine()?.Trim();
+Console.Write("Contraseña DVRIP (Enter para dejar vacio): ");
+var passwordDvrip = Console.ReadLine()?.Trim();
+
+var camaraRtsp = new CameraDescriptor
 {
-    var camera = new CameraDescriptor
-    {
-        Id = "diagnostic-camera",
-        Name = "Camara de prueba",
-        IpAddress = ip,
-        Username = string.IsNullOrWhiteSpace(user) ? null : user,
-        Password = string.IsNullOrWhiteSpace(pass) ? null : pass,
-    };
+    Id = "diagnostic-camera-rtsp",
+    Name = "Camara de prueba (RTSP/ONVIF)",
+    IpAddress = ip,
+    Username = string.IsNullOrWhiteSpace(usuarioRtsp) ? null : usuarioRtsp,
+    Password = string.IsNullOrWhiteSpace(passwordRtsp) ? null : passwordRtsp,
+};
 
-    var adapters = new ICameraAdapter[] { new RtspCameraAdapter() };
-    var detection = new CameraDetectionService(adapters);
+var camaraDvrip = new CameraDescriptor
+{
+    Id = "diagnostic-camera-dvrip",
+    Name = "Camara de prueba (DVRIP)",
+    IpAddress = ip,
+    Username = string.IsNullOrWhiteSpace(usuarioDvrip) ? null : usuarioDvrip,
+    Password = string.IsNullOrWhiteSpace(passwordDvrip) ? null : passwordDvrip,
+};
 
+// Cada prueba viaja con el descriptor (y por lo tanto las credenciales) del
+// protocolo que le corresponde: las de RTSP/ONVIF para las pruebas RTSP y
+// PTZ-ONVIF, las de DVRIP para las pruebas DVRIP y PTZ-DVRIP.
+var pruebas = new List<(string Grupo, IDiagnosticTest Prueba, CameraDescriptor Camara)>
+{
+    ("RTSP",  new RtspOptionsTest(),          camaraRtsp),
+    ("RTSP",  new RtspConfigDiscoveryTest(),  camaraRtsp),
+    ("RTSP",  new RtspOnvifCapabilityTest(),  camaraRtsp),
+    ("DVRIP", new DvripLoginTest(),           camaraDvrip),
+    ("DVRIP", new DvripConfigDiscoveryTest(), camaraDvrip),
+    ("PTZ",   new OnvifPtzTest(),             camaraRtsp),
+    ("PTZ",   new DvripPtzTest(),             camaraDvrip),
+};
+
+while (true)
+{
     Console.WriteLine();
-    Console.WriteLine($"Probando conexion a {ip} ...");
-    Console.WriteLine("(esto puede tardar unos segundos mientras se prueban distintas rutas RTSP)");
-    Console.WriteLine();
-
-    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-
-    try
+    Console.WriteLine("Pruebas disponibles:");
+    for (var i = 0; i < pruebas.Count; i++)
     {
-        var detected = await detection.DetectAsync(camera, cts.Token);
-
-        if (detected.AdapterUsed is null)
-        {
-            Console.WriteLine("RESULTADO: No se pudo detectar la camara por RTSP.");
-            Console.WriteLine();
-            Console.WriteLine("Posibles causas:");
-            Console.WriteLine("  - La camara no soporta RTSP (usa protocolo propietario, tipo iCSee).");
-            Console.WriteLine("  - La IP, usuario o contraseña son incorrectos.");
-            Console.WriteLine("  - La camara esta en otra red / no responde en el puerto 554.");
-            Console.WriteLine("  - Este dispositivo directamente no es una camara.");
-            Console.WriteLine();
-            Console.WriteLine("Proximo paso sugerido: probar con la app ONVIF Device Manager,");
-            Console.WriteLine("o confirmar la IP/credenciales desde la app iCSee.");
-        }
-        else
-        {
-            Console.WriteLine($"RESULTADO: La camara respondio RTSP (adapter: {detected.AdapterUsed})");
-            Console.WriteLine();
-
-            var adapter = detection.GetAdapter(detected)!;
-            var connection = await adapter.ConnectAsync(detected, cts.Token);
-
-            Console.WriteLine($"  URL RTSP encontrada : {connection.NormalizedStreamUrl}");
-            Console.WriteLine($"  Soporta audio        : {(connection.SupportsAudio ? "Si" : "No")}");
-            Console.WriteLine();
-            Console.WriteLine("Podes probar esta URL directamente en VLC:");
-            Console.WriteLine("  Medio -> Abrir ubicacion de red -> pegar la URL de arriba");
-        }
+        var (grupo, prueba, _) = pruebas[i];
+        Console.WriteLine($"  {i + 1}. [{grupo}] {prueba.Nombre} - {prueba.Descripcion}");
     }
-    catch (OperationCanceledException)
+    Console.WriteLine("  A. Ejecutar todas");
+    Console.WriteLine("  0. Salir");
+    Console.Write("Opcion: ");
+
+    var opcion = Console.ReadLine()?.Trim();
+
+    if (string.IsNullOrWhiteSpace(opcion) || opcion == "0")
     {
-        Console.WriteLine("RESULTADO: Tiempo de espera agotado (30s). La camara no respondio.");
+        break;
     }
-    catch (Exception ex)
+
+    if (opcion.Equals("A", StringComparison.OrdinalIgnoreCase))
     {
-        Console.WriteLine($"RESULTADO: Error inesperado - {ex.Message}");
+        foreach (var (grupo, prueba, camara) in pruebas)
+        {
+            await EjecutarConConfirmacionAsync(grupo, prueba, camara);
+        }
+        continue;
+    }
+
+    if (int.TryParse(opcion, out var indice) && indice >= 1 && indice <= pruebas.Count)
+    {
+        var (grupo, prueba, camara) = pruebas[indice - 1];
+        await EjecutarConConfirmacionAsync(grupo, prueba, camara);
+    }
+    else
+    {
+        Console.WriteLine("Opcion invalida.");
     }
 }
 
 Console.WriteLine();
-Console.WriteLine("Presione Enter para salir...");
-Console.ReadLine();
+Console.WriteLine("Fin del diagnostico.");
+
+static async Task EjecutarConConfirmacionAsync(string grupo, IDiagnosticTest prueba, CameraDescriptor camara)
+{
+    // DvripPtzTest mueve la camara de verdad (aunque sea un pulso breve por
+    // direccion): se pide confirmacion antes de correrla para no mover la
+    // camara sin querer al elegir "Ejecutar todas".
+    if (prueba is DvripPtzTest)
+    {
+        Console.WriteLine();
+        Console.Write($"'{prueba.Nombre}' va a mover la camara brevemente en cada direccion. ¿Continuar? (s/N): ");
+        var confirmacion = Console.ReadLine()?.Trim();
+
+        if (!string.Equals(confirmacion, "s", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("Prueba omitida.");
+            return;
+        }
+    }
+
+    await EjecutarYMostrarAsync(grupo, prueba, camara);
+}
+
+static async Task EjecutarYMostrarAsync(string grupo, IDiagnosticTest prueba, CameraDescriptor camara)
+{
+    Console.WriteLine();
+    Console.WriteLine($"--- [{grupo}] {prueba.Nombre} ---");
+
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+    try
+    {
+        var resultado = await prueba.EjecutarAsync(camara, cts.Token);
+
+        Console.WriteLine(resultado.Exitoso ? $"OK: {resultado.Resumen}" : $"FALLO: {resultado.Resumen}");
+
+        if (!string.IsNullOrWhiteSpace(resultado.Error))
+        {
+            var errorCorto = resultado.Error.Length > 300 ? resultado.Error[..300] + "..." : resultado.Error;
+            Console.WriteLine($"  Detalle: {errorCorto}");
+        }
+
+        foreach (var (clave, valor) in resultado.Datos)
+        {
+            var valorCorto = valor.Length > 200 ? valor[..200] + "..." : valor;
+            Console.WriteLine($"  {clave}: {valorCorto}");
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine("Tiempo de espera agotado (30s).");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error inesperado: {ex.Message}");
+    }
+}

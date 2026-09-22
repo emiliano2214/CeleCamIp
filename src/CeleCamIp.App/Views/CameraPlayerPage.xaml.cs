@@ -89,12 +89,30 @@ public partial class CameraPlayerPage : ContentPage
     protected override void OnAppearing()
     {
         base.OnAppearing();
+
+        // [FIX RECARGA POR PANTALLA APAGADA] Verificado con logcat en un
+        // dispositivo real (Galaxy A12): cuando la pantalla se apaga estando
+        // en esta vista, Android recorta el proceso del WebView para liberar
+        // memoria, y al volver a encenderla el WebView recarga la pagina
+        // entera desde cero (se ve "=== CeleCamIp Player ===" repetirse en
+        // el log de consola del WebView). Eso tira toda la sesion WebRTC/
+        // SignalR que ya estaba armada y arranca todo de nuevo, incluyendo
+        // la espera al proximo keyframe real (~10s con camaras de GOP largo,
+        // ver historial de EmitAccessUnit en FFmpegProcessSource.cs del
+        // Gateway) - si la pantalla se apaga cada tanto, la vista nunca
+        // llega a estabilizarse. KeepScreenOn evita que la pantalla se
+        // apague sola mientras esta vista esta activa, sin depender de que
+        // el usuario la este tocando a mano.
+        DeviceDisplay.Current.KeepScreenOn = true;
+
         StartPlayback();
     }
 
     protected override void OnDisappearing()
     {
         base.OnDisappearing();
+
+        DeviceDisplay.Current.KeepScreenOn = false;
 
         // "about:blank" descarga la pagina actual (y con ella el JS en
         // ejecucion), lo que cierra la RTCPeerConnection y la conexion

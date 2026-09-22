@@ -1,4 +1,4 @@
-﻿using CeleCamIp.Shared.WebRtc;
+using CeleCamIp.Shared.WebRtc;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using System.Reflection;
@@ -17,6 +17,7 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
 {
     private readonly RTCPeerConnection _peerConnection;
     private readonly FFmpegProcessSource _videoSource;
+    private readonly AudioProcessSource _audioSource;
     private readonly DateTime _creationTime;
     private int _frameCount;
     private bool _firstFrameCaptured;
@@ -52,21 +53,28 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
     /// <summary>Se dispara cuando la sesion se cierra, con el tiempo total de vida de la sesion.</summary>
     public event Action<TimeSpan>? OnClosedWithElapsed;
 
-    /// <summary>Se dispara con información de bitrate cada 50 frames.</summary>
+    /// <summary>Se dispara con informaci�n de bitrate cada 50 frames.</summary>
     public event Action<int>? OnBitrateUpdated;
 
-    /// <summary>Se dispara cuando se envía un frame por RTP.</summary>
+    /// <summary>Se dispara cuando se env�a un frame por RTP.</summary>
     public event Action<int, int>? OnFrameSent;
 
     /// <summary>Se dispara cuando hay un error en FFmpeg.</summary>
     public event Action<string>? OnFFmpegError;
 
-    private WebRtcCameraSession(string viewerConnectionId, string cameraId, RTCPeerConnection peerConnection, FFmpegProcessSource videoSource, ILogger? logger = null)
+    /// <summary>Se dispara cuando hay un error en el proceso FFmpeg de audio (no fatal: la sesion sigue solo con video).</summary>
+    public event Action<string>? OnFFmpegAudioError;
+
+    /// <summary>Se dispara cuando el audio no pudo iniciarse (ej: la camara no tiene stream de audio). No fatal.</summary>
+    public event Action<Exception>? OnAudioStartFailed;
+
+    private WebRtcCameraSession(string viewerConnectionId, string cameraId, RTCPeerConnection peerConnection, FFmpegProcessSource videoSource, AudioProcessSource audioSource, ILogger? logger = null)
     {
         ViewerConnectionId = viewerConnectionId;
         CameraId = cameraId;
         _peerConnection = peerConnection;
         _videoSource = videoSource;
+        _audioSource = audioSource;
         _logger = logger;
         _creationTime = DateTime.UtcNow;
         _frameCount = 0;
@@ -109,9 +117,43 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
             h264ClockRate,
             h264FmtpParameters);
 
-        Console.WriteLine($"[WebRTC] ✅ H264 creado: PT={h264DynamicPayloadType}, ClockRate={h264ClockRate}, Fmtp=\"{h264FmtpParameters}\"");
+        Console.WriteLine($"[WebRTC] ? H264 creado: PT={h264DynamicPayloadType}, ClockRate={h264ClockRate}, Fmtp=\"{h264FmtpParameters}\"");
 
         return new List<VideoFormat> { format };
+    }
+
+    /// <summary>
+    /// Crea el formato de audio Opus que se anuncia en el SDP.
+    ///
+    /// El "channels" de la linea rtpmap SIEMPRE se anuncia como 2 para Opus
+    /// en WebRTC/SDP (RFC 7587), sin importar si el audio codificado es en
+    /// realidad mono - es una convencion del formato, no una declaracion de
+    /// cuantos canales trae cada paquete (eso lo indica el propio paquete
+    /// Opus, que es autodescriptivo). AudioProcessSource codifica en mono
+    /// igual, que es lo tipico en microfonos de camaras IP.
+    ///
+    /// PT 97 (distinto del 96 que ya usa H264) para no chocar dynamic
+    /// payload types dentro del mismo SDP. minptime=10;useinbandfec=1 son
+    /// los parametros fmtp recomendados para Opus en WebRTC (mejor manejo
+    /// de perdida de paquetes via FEC in-band).
+    /// </summary>
+    private static List<AudioFormat> CreateOpusFormats()
+    {
+        const int opusDynamicPayloadType = 97;
+        const int opusClockRate = 48000;
+        const int opusChannels = 2; // Convencion SDP RFC 7587, no el conteo real de canales codificados.
+        const string opusFmtpParameters = "minptime=10;useinbandfec=1";
+
+        var format = new AudioFormat(
+            AudioCodecsEnum.OPUS,
+            opusDynamicPayloadType,
+            opusClockRate,
+            opusChannels,
+            opusFmtpParameters);
+
+        Console.WriteLine($"[WebRTC] Opus creado: PT={opusDynamicPayloadType}, ClockRate={opusClockRate}, Fmtp=\"{opusFmtpParameters}\"");
+
+        return new List<AudioFormat> { format };
     }
 
 
@@ -126,28 +168,29 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
         IReadOnlyList<RTCIceServer> iceServers,
         ILogger? logger = null)
     {
-        logger?.LogInformation($"[WebRTC] Creando sesión para Viewer={viewerConnectionId}, Camera={cameraId}");
+        logger?.LogInformation($"[WebRTC] Creando sesi�n para Viewer={viewerConnectionId}, Camera={cameraId}");
         logger?.LogInformation($"[WebRTC] Stream URL: {rtspStreamUrl}");
-        Console.WriteLine($"[WebRTC] Creando sesión para Viewer={viewerConnectionId}, Camera={cameraId}");
+        Console.WriteLine($"[WebRTC] Creando sesi�n para Viewer={viewerConnectionId}, Camera={cameraId}");
         Console.WriteLine($"[WebRTC] Stream URL: {rtspStreamUrl}");
 
         // ============================================================
         // USAR FFmpegProcessSource EN VEZ DE FFmpegFileSource
         // ============================================================
         var videoSource = new FFmpegProcessSource(rtspStreamUrl, logger);
+        var audioSource = new AudioProcessSource(rtspStreamUrl, logger);
 
         // Crear formatos H264 manualmente
         var videoFormats = CreateH264Formats();
 
         if (videoFormats == null || videoFormats.Count == 0)
         {
-            logger?.LogError("[WebRTC] ❌ No se pudieron crear formatos de video H264");
-            Console.WriteLine("[WebRTC] ❌ No se pudieron crear formatos de video H264");
+            logger?.LogError("[WebRTC] ? No se pudieron crear formatos de video H264");
+            Console.WriteLine("[WebRTC] ? No se pudieron crear formatos de video H264");
             throw new InvalidOperationException("No se pudieron crear formatos de video H264");
         }
 
-        logger?.LogInformation($"[WebRTC] ✅ {videoFormats.Count} formato(s) H264 creado(s)");
-        Console.WriteLine($"[WebRTC] ✅ {videoFormats.Count} formato(s) H264 creado(s)");
+        logger?.LogInformation($"[WebRTC] ? {videoFormats.Count} formato(s) H264 creado(s)");
+        Console.WriteLine($"[WebRTC] ? {videoFormats.Count} formato(s) H264 creado(s)");
 
         // Configurar ICE
         logger?.LogInformation($"[WebRTC] Configurando ICE con {iceServers.Count} servidores...");
@@ -161,16 +204,49 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
         var track = new MediaStreamTrack(videoFormats, MediaStreamStatusEnum.SendOnly);
         peerConnection.addTrack(track);
 
-        var session = new WebRtcCameraSession(viewerConnectionId, cameraId, peerConnection, videoSource, logger);
+        // Agregar track de audio (Opus). Se agrega siempre (para que el SDP
+        // incluya el m=audio y el viewer negocie el codec), aunque el arranque
+        // de AudioProcessSource mas abajo pueda fallar si la camara no tiene
+        // audio: en ese caso el m=audio queda negociado pero sin datos, y el
+        // video sigue andando igual.
+        logger?.LogInformation("[WebRTC] Agregando track de audio (Opus)...");
+        Console.WriteLine("[WebRTC] Agregando track de audio (Opus)...");
+        var audioFormats = CreateOpusFormats();
+        var audioTrack = new MediaStreamTrack(audioFormats, MediaStreamStatusEnum.SendOnly);
+        peerConnection.addTrack(audioTrack);
 
-        // Suscribirse a eventos de FFmpeg para diagnóstico
+        var session = new WebRtcCameraSession(viewerConnectionId, cameraId, peerConnection, videoSource, audioSource, logger);
+
+        // Suscribirse a eventos de FFmpeg para diagn�stico
         videoSource.OnVideoSourceError += error =>
         {
-            logger?.LogError($"[WebRTC] ❌ FFmpeg Error: {error}");
-            Console.WriteLine($"[WebRTC] ❌ FFmpeg Error: {error}");
+            logger?.LogError($"[WebRTC] ? FFmpeg Error: {error}");
+            Console.WriteLine($"[WebRTC] ? FFmpeg Error: {error}");
             session.OnFFmpegError?.Invoke(error);
         };
 
+        // Igual criterio que el error de video: se loguea y se propaga, pero
+        // nunca tira abajo la sesion (el audio es secundario al video).
+        audioSource.OnAudioSourceError += error =>
+        {
+            logger?.LogWarning($"[WebRTC] Audio Warning: {error}");
+            Console.WriteLine($"[WebRTC] Audio Warning: {error}");
+            session.OnFFmpegAudioError?.Invoke(error);
+        };
+
+        // Cada frame Opus ya codificado (20ms) se manda directo por RTP de audio.
+        audioSource.OnAudioSourceEncodedSample += (durationRtpUnits, sample) =>
+        {
+            try
+            {
+                peerConnection.SendAudio(durationRtpUnits, sample);
+            }
+            catch (Exception ex)
+            {
+                logger?.LogError($"[WebRTC] Error enviando frame de audio: {ex.Message}");
+                Console.WriteLine($"[WebRTC] Error enviando frame de audio: {ex.Message}");
+            }
+        };
         // Cada muestra H264 ya codificada que entrega ffmpeg se manda directo por RTP.
         videoSource.OnVideoSourceEncodedSample += (durationRtpUnits, sample) =>
         {
@@ -184,15 +260,15 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                     session._firstFrameCaptured = true;
                     session._firstFrameTime = DateTime.UtcNow;
                     var elapsed = session._firstFrameTime.Value - session._creationTime;
-                    logger?.LogInformation($"[WebRTC] 🎬 PRIMER FRAME: {elapsed.TotalMilliseconds:F0}ms, tamaño: {sample.Length} bytes");
-                    Console.WriteLine($"[WebRTC] 🎬 PRIMER FRAME: {elapsed.TotalMilliseconds:F0}ms, tamaño: {sample.Length} bytes");
+                    logger?.LogInformation($"[WebRTC] ?? PRIMER FRAME: {elapsed.TotalMilliseconds:F0}ms, tama�o: {sample.Length} bytes");
+                    Console.WriteLine($"[WebRTC] ?? PRIMER FRAME: {elapsed.TotalMilliseconds:F0}ms, tama�o: {sample.Length} bytes");
                     session.OnFirstFrameElapsed?.Invoke(elapsed);
                 }
 
                 if (session._frameCount % 25 == 0)
                 {
-                    logger?.LogInformation($"[WebRTC] 📹 Frames enviados: {session._frameCount} para cámara {cameraId}");
-                    Console.WriteLine($"[WebRTC] 📹 Frames enviados: {session._frameCount} para cámara {cameraId}");
+                    logger?.LogInformation($"[WebRTC] ?? Frames enviados: {session._frameCount} para c�mara {cameraId}");
+                    Console.WriteLine($"[WebRTC] ?? Frames enviados: {session._frameCount} para c�mara {cameraId}");
                 }
 
                 if (session._frameCount % 50 == 0)
@@ -205,8 +281,8 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                     {
                         var fps = framesDiff / elapsed.TotalSeconds;
                         var bitrate = (int)(session._totalBytesSent * 8 / elapsed.TotalSeconds / 1000);
-                        logger?.LogInformation($"[WebRTC] 📊 FPS: {fps:F1}, Bitrate: {bitrate} kbps, Frames: {session._frameCount}");
-                        Console.WriteLine($"[WebRTC] 📊 FPS: {fps:F1}, Bitrate: {bitrate} kbps, Frames: {session._frameCount}");
+                        logger?.LogInformation($"[WebRTC] ?? FPS: {fps:F1}, Bitrate: {bitrate} kbps, Frames: {session._frameCount}");
+                        Console.WriteLine($"[WebRTC] ?? FPS: {fps:F1}, Bitrate: {bitrate} kbps, Frames: {session._frameCount}");
                         session.OnBitrateUpdated?.Invoke(bitrate);
                     }
 
@@ -224,8 +300,8 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    logger?.LogError($"[WebRTC] ❌ Error enviando frame: {ex.Message}");
-                    Console.WriteLine($"[WebRTC] ❌ Error enviando frame: {ex.Message}");
+                    logger?.LogError($"[WebRTC] ? Error enviando frame: {ex.Message}");
+                    Console.WriteLine($"[WebRTC] ? Error enviando frame: {ex.Message}");
                 }
             }
         };
@@ -242,18 +318,37 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
         try
         {
             await videoSource.StartVideo();
-            logger?.LogInformation("[WebRTC] ✅ FFmpeg arrancado (en paralelo a la negociación ICE)");
-            Console.WriteLine("[WebRTC] ✅ FFmpeg arrancado (en paralelo a la negociación ICE)");
+            logger?.LogInformation("[WebRTC] ? FFmpeg arrancado (en paralelo a la negociaci�n ICE)");
+            Console.WriteLine("[WebRTC] ? FFmpeg arrancado (en paralelo a la negociaci�n ICE)");
             session.OnVideoStartFailed?.Invoke(null);
         }
         catch (Exception ex)
         {
-            logger?.LogError($"[WebRTC] ❌ Error iniciando video: {ex.Message}");
-            Console.WriteLine($"[WebRTC] ❌ Error iniciando video: {ex.Message}");
+            logger?.LogError($"[WebRTC] ? Error iniciando video: {ex.Message}");
+            Console.WriteLine($"[WebRTC] ? Error iniciando video: {ex.Message}");
             session.OnVideoStartFailed?.Invoke(ex);
             throw;
         }
 
+        // Audio en paralelo, mismo criterio de arranque temprano que el video.
+        // A DIFERENCIA del video, un fallo aca NO es fatal: si la camara no
+        // tiene stream de audio (o ffmpeg no puede abrirlo), la sesion sigue
+        // con video solo. Es el comportamiento esperado, no un bug: antes
+        // de esto el audio nunca se transmitia (el pipeline de video usaba
+        // -an a proposito), asi que "sin audio" seguia siendo el resultado
+        // normal si la camara no lo tiene.
+        try
+        {
+            await audioSource.StartAudio();
+            logger?.LogInformation("[WebRTC] Audio (Opus) arrancado en paralelo");
+            Console.WriteLine("[WebRTC] Audio (Opus) arrancado en paralelo");
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning($"[WebRTC] No se pudo iniciar audio (sesion sigue solo con video): {ex.Message}");
+            Console.WriteLine($"[WebRTC] No se pudo iniciar audio (sesion sigue solo con video): {ex.Message}");
+            session.OnAudioStartFailed?.Invoke(ex);
+        }
         peerConnection.onicecandidate += candidate =>
         {
             if (candidate is null)
@@ -274,6 +369,38 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                 candidate.candidate, candidate.sdpMid, candidate.sdpMLineIndex, candidate.usernameFragment));
         };
 
+        // [DIAGNOSTICO cierre ~10s tras el primer keyframe] Estos tres hooks
+        // no estaban conectados. La hipotesis a confirmar: el burst grande
+        // del primer keyframe (100-300KB fragmentado en RTP) satura algo y
+        // el navegador deja de mandar RTCP receiver reports / keepalives a
+        // tiempo, lo que dispara RTPSession.OnTimeout y cierra la conexion
+        // sin que sea un fallo de ICE progresivo (por eso nunca vemos
+        // "disconnected"/"failed", solo "closed" directo).
+        peerConnection.OnTimeout += mediaType =>
+        {
+            logger?.LogWarning($"[WebRTC] ?? OnTimeout: no se recibio RTP/RTCP del peer para {mediaType}");
+            Console.WriteLine($"[WebRTC] ?? OnTimeout: no se recibio RTP/RTCP del peer para {mediaType}");
+        };
+
+        peerConnection.OnReceiveReport += (remoteEndPoint, mediaType, rtcpCompoundPacket) =>
+        {
+            var rr = rtcpCompoundPacket.ReceiverReport;
+            if (rr?.ReceptionReports is { Count: > 0 })
+            {
+                foreach (var report in rr.ReceptionReports)
+                {
+                    logger?.LogInformation($"[WebRTC] ?? RTCP ReceiverReport de {remoteEndPoint}: FractionLost={report.FractionLost}, PacketsLost={report.PacketsLost}, Jitter={report.Jitter}");
+                    Console.WriteLine($"[WebRTC] ?? RTCP ReceiverReport de {remoteEndPoint}: FractionLost={report.FractionLost}, PacketsLost={report.PacketsLost}, Jitter={report.Jitter}");
+                }
+            }
+        };
+
+        peerConnection.oniceconnectionstatechange += iceState =>
+        {
+            logger?.LogInformation($"[WebRTC] ICE Connection State: {iceState}");
+            Console.WriteLine($"[WebRTC] ICE Connection State: {iceState}");
+        };
+
         peerConnection.onconnectionstatechange += state =>
         {
             logger?.LogInformation($"[WebRTC] Connection State: {state}");
@@ -285,15 +412,15 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                 case RTCPeerConnectionState.connected:
                     // El video ya se arranco antes (en paralelo a la negociacion ICE,
                     // ver comentario mas arriba); aca solo queda loguear el estado.
-                    logger?.LogInformation("[WebRTC] Conexión establecida (video ya iniciado en paralelo)");
-                    Console.WriteLine("[WebRTC] Conexión establecida (video ya iniciado en paralelo)");
+                    logger?.LogInformation("[WebRTC] Conexi�n establecida (video ya iniciado en paralelo)");
+                    Console.WriteLine("[WebRTC] Conexi�n establecida (video ya iniciado en paralelo)");
                     break;
                 case RTCPeerConnectionState.closed:
                 case RTCPeerConnectionState.failed:
                 case RTCPeerConnectionState.disconnected:
                     var elapsed = DateTime.UtcNow - session._creationTime;
-                    logger?.LogInformation($"[WebRTC] Sesión cerrada después de {elapsed.TotalMilliseconds:F0}ms");
-                    Console.WriteLine($"[WebRTC] Sesión cerrada después de {elapsed.TotalMilliseconds:F0}ms");
+                    logger?.LogInformation($"[WebRTC] Sesi�n cerrada despu�s de {elapsed.TotalMilliseconds:F0}ms");
+                    Console.WriteLine($"[WebRTC] Sesi�n cerrada despu�s de {elapsed.TotalMilliseconds:F0}ms");
                     session.OnClosedWithElapsed?.Invoke(elapsed);
                     session.OnClosed?.Invoke();
                     break;
@@ -306,9 +433,9 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
         var offerInit = peerConnection.createOffer(new RTCOfferOptions());
         await peerConnection.setLocalDescription(offerInit);
 
-        logger?.LogInformation($"[WebRTC] ✅ Oferta SDP creada: {offerInit.type}");
+        logger?.LogInformation($"[WebRTC] ? Oferta SDP creada: {offerInit.type}");
         logger?.LogInformation($"[WebRTC] SDP Length: {offerInit.sdp?.Length ?? 0} caracteres");
-        Console.WriteLine($"[WebRTC] ✅ Oferta SDP creada: {offerInit.type}");
+        Console.WriteLine($"[WebRTC] ? Oferta SDP creada: {offerInit.type}");
         Console.WriteLine($"[WebRTC] SDP Length: {offerInit.sdp?.Length ?? 0} caracteres");
 
         return (session, new SdpDescriptionDto(offerInit.type.ToString().ToLowerInvariant(), offerInit.sdp));
@@ -329,13 +456,13 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
                 type = RTCSdpType.answer,
                 sdp = answer.Sdp
             });
-            _logger?.LogInformation("[WebRTC] ✅ Answer establecido correctamente");
-            Console.WriteLine("[WebRTC] ✅ Answer establecido correctamente");
+            _logger?.LogInformation("[WebRTC] ? Answer establecido correctamente");
+            Console.WriteLine("[WebRTC] ? Answer establecido correctamente");
         }
         catch (Exception ex)
         {
-            _logger?.LogError($"[WebRTC] ❌ Error estableciendo Answer: {ex.Message}");
-            Console.WriteLine($"[WebRTC] ❌ Error estableciendo Answer: {ex.Message}");
+            _logger?.LogError($"[WebRTC] ? Error estableciendo Answer: {ex.Message}");
+            Console.WriteLine($"[WebRTC] ? Error estableciendo Answer: {ex.Message}");
             throw;
         }
     }
@@ -358,12 +485,12 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger?.LogError($"[WebRTC] ❌ Error agregando ICE candidate: {ex.Message}");
-            Console.WriteLine($"[WebRTC] ❌ Error agregando ICE candidate: {ex.Message}");
+            _logger?.LogError($"[WebRTC] ? Error agregando ICE candidate: {ex.Message}");
+            Console.WriteLine($"[WebRTC] ? Error agregando ICE candidate: {ex.Message}");
         }
     }
 
-    /// <summary>Obtiene estadísticas de la sesión.</summary>
+    /// <summary>Obtiene estad�sticas de la sesi�n.</summary>
     public (int FrameCount, TimeSpan? Elapsed, bool HasVideo) GetStats()
     {
         lock (_lock)
@@ -384,8 +511,8 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
         }
 
         _disposed = true;
-        _logger?.LogInformation($"[WebRTC] Disposing sesión para {CameraId}...");
-        Console.WriteLine($"[WebRTC] Disposing sesión para {CameraId}...");
+        _logger?.LogInformation($"[WebRTC] Disposing sesi�n para {CameraId}...");
+        Console.WriteLine($"[WebRTC] Disposing sesi�n para {CameraId}...");
 
         try
         {
@@ -413,6 +540,30 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
 
         try
         {
+            await _audioSource.CloseAudio();
+            _logger?.LogInformation("[WebRTC] Audio cerrado");
+            Console.WriteLine("[WebRTC] Audio cerrado");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning($"[WebRTC] Error cerrando audio: {ex.Message}");
+            Console.WriteLine($"[WebRTC] Error cerrando audio: {ex.Message}");
+        }
+
+        try
+        {
+            _audioSource.Dispose();
+            _logger?.LogInformation("[WebRTC] Audio source disposed");
+            Console.WriteLine("[WebRTC] Audio source disposed");
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning($"[WebRTC] Error disposing audio source: {ex.Message}");
+            Console.WriteLine($"[WebRTC] Error disposing audio source: {ex.Message}");
+        }
+
+        try
+        {
             _peerConnection.close();
             _peerConnection.Dispose();
             _logger?.LogInformation("[WebRTC] PeerConnection cerrada");
@@ -424,7 +575,7 @@ public sealed class WebRtcCameraSession : IAsyncDisposable
             Console.WriteLine($"[WebRTC] Error cerrando PeerConnection: {ex.Message}");
         }
 
-        _logger?.LogInformation($"[WebRTC] ✅ Sesión {CameraId} disposed correctamente");
-        Console.WriteLine($"[WebRTC] ✅ Sesión {CameraId} disposed correctamente");
+        _logger?.LogInformation($"[WebRTC] ? Sesi�n {CameraId} disposed correctamente");
+        Console.WriteLine($"[WebRTC] ? Sesi�n {CameraId} disposed correctamente");
     }
 }

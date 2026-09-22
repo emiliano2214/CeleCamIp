@@ -1,11 +1,11 @@
-Ôªøusing System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace CeleCamIp.Gateway.Services;
 
 /// <summary>
 /// Fuente de video que usa FFmpeg como proceso externo en lugar de SIPSorceryMedia.FFmpeg.
-/// Esto evita el bug de decodificaci√≥n de SIPSorceryMedia.FFmpeg.
+/// Esto evita el bug de decodificaciÛn de SIPSorceryMedia.FFmpeg.
 ///
 /// HISTORIAL DE BUGS ARREGLADOS EN ESTA VERSION:
 ///
@@ -76,9 +76,8 @@ namespace CeleCamIp.Gateway.Services;
 ///    despues vaya por UDP con -rtsp_transport udp). MonitorProcessAsync()
 ///    solo detecta cuando el proceso YA termino, no puede hacer nada si el
 ///    proceso nunca llega a terminar solo. Fix: -timeout (propio del
-///    demuxer RTSP, cubre el canal de control TCP) y -rw_timeout (generico
-///    de libavformat, cubre cualquier operacion de red, incluido el canal
-///    de datos UDP) en 10s (10000000 microsegundos) - generoso para una
+///    demuxer RTSP, cubre el canal de control TCP) en 10s (10000000
+///    microsegundos) - generoso para una
 ///    camara en la misma LAN que el Gateway, sin llegar a ser un timeout
 ///    "eterno". OJO: esto es el timeout de la conexion RTSP Gateway<->camara
 ///    (LAN), totalmente independiente del timeout/latencia de ICE/TURN
@@ -120,6 +119,15 @@ public class FFmpegProcessSource : IDisposable
 
     private DateTime? _lastAccessUnitTime;
 
+    /// <summary>
+    /// Se pone en true recien cuando se emite el primer NAL IDR (keyframe,
+    /// nalType 5) real. Hasta entonces, cualquier delta frame (P-frame,
+    /// nalType 1) se descarta: el viewer no tiene con que decodificarlo (no
+    /// hay frame de referencia previo), lo que se traducia en pantalla negra
+    /// o un "parpadeo" de un instante cuando por azar caia un IDR aislado.
+    /// </summary>
+    private bool _hasSeenKeyframe;
+
     public event Action<uint, byte[]>? OnVideoSourceEncodedSample;
     public event Action<string>? OnVideoSourceError;
 
@@ -140,7 +148,7 @@ public class FFmpegProcessSource : IDisposable
             var ffmpegPath = FindFFmpeg();
             if (string.IsNullOrEmpty(ffmpegPath))
             {
-                throw new FileNotFoundException("No se encontr√≥ ffmpeg.exe en el PATH");
+                throw new FileNotFoundException("No se encontrÛ ffmpeg.exe en el PATH");
             }
 
             _logger?.LogInformation($"FFmpeg encontrado en: {ffmpegPath}");
@@ -179,10 +187,15 @@ public class FFmpegProcessSource : IDisposable
             // de NAT/firewall que justifiquen forzar TCP - eso solo importaria si el
             // Gateway estuviera fuera de la LAN de la camara, que no es el caso.
             // [FIX 7 - SIN TIMEOUT] Ver punto 6 del historial de bugs arriba de la
-            // clase. -timeout y -rw_timeout en 10s: generoso para LAN, evita que
-            // ffmpeg quede colgado para siempre si la camara no responde.
+            // clase. -timeout en 10s: generoso para LAN, evita que ffmpeg quede
+            // colgado para siempre si la camara no responde. NOTA: -rw_timeout
+            // se probo tambien pero el demuxer RTSP nunca lo soporto pese a
+            // estar documentado como generico (ver ffmpeg trac #7609); en
+            // FFmpeg 8.1 se volvio directamente "Option rw_timeout not found"
+            // y abortaba la apertura del input por completo, asi que se saco
+            // del comando dejando solo -timeout.
             var args = $"-fflags nobuffer -flags low_delay -probesize 65536 -analyzeduration 300000 " +
-                      $"-rw_timeout 10000000 -timeout 10000000 " +
+                      $"-timeout 10000000 " +
                       $"-err_detect ignore_err -rtsp_transport udp -i \"{_rtspUrl}\" " +
                       $"-map 0:v:0 -c:v copy -an -f h264 pipe:1";
 
@@ -208,7 +221,7 @@ public class FFmpegProcessSource : IDisposable
 
             _isRunning = true;
             _logger?.LogInformation("FFmpeg iniciado correctamente");
-            Console.WriteLine("[FFmpegProcess] ‚úÖ FFmpeg iniciado correctamente");
+            Console.WriteLine("[FFmpegProcess] ? FFmpeg iniciado correctamente");
 
             _ = Task.Run(() => ReadFramesAsync(_cts.Token));
             _ = MonitorProcessAsync();
@@ -216,7 +229,7 @@ public class FFmpegProcessSource : IDisposable
         catch (Exception ex)
         {
             _logger?.LogError($"Error iniciando FFmpeg: {ex.Message}");
-            Console.WriteLine($"[FFmpegProcess] ‚ùå Error: {ex.Message}");
+            Console.WriteLine($"[FFmpegProcess] ? Error: {ex.Message}");
             OnVideoSourceError?.Invoke(ex.Message);
             throw;
         }
@@ -404,7 +417,34 @@ public class FFmpegProcessSource : IDisposable
             bool isVclSlice = nalType == 1 || nalType == 5;
             if (isVclSlice)
             {
-                EmitAccessUnit();
+                // [FIX PANTALLA NEGRA/PARPADEO] Con -c:v copy no se re-codifica nada,
+                // asi que el primer access unit que llega puede perfectamente ser un
+                // P-frame (delta, depende de un frame anterior que el decoder del
+                // viewer nunca tuvo). Un decoder H264 no puede reconstruir un P-frame
+                // sin su referencia: el navegador queda esperando en negro hasta que
+                // por azar cae un IDR (nalType 5), lo pinta un instante ("parpadeo"),
+                // y si se pierde un P-frame despues (UDP, sin retransmision en este
+                // path) la cadena de referencias se rompe y vuelve a negro aunque
+                // video.play() ya haya resuelto su promise del lado del viewer. Fix:
+                // descartar todo delta frame hasta ver el primer IDR real; recien ahi
+                // arrancar a emitir (de ahi en mas los P-frames si tienen con que
+                // decodificar).
+                if (!_hasSeenKeyframe)
+                {
+                    if (nalType == 5)
+                    {
+                        _hasSeenKeyframe = true;
+                        EmitAccessUnit();
+                    }
+                    else
+                    {
+                        _accessUnitBuffer.Clear();
+                    }
+                }
+                else
+                {
+                    EmitAccessUnit();
+                }
             }
         }
     }
@@ -450,12 +490,12 @@ public class FFmpegProcessSource : IDisposable
 
         if (_frameCount == 1)
         {
-            Console.WriteLine($"[FFmpegProcess] üé¨ PRIMER FRAME: {elapsed.TotalMilliseconds:F0}ms, tama√±o: {sample.Length} bytes");
+            Console.WriteLine($"[FFmpegProcess] ?? PRIMER FRAME: {elapsed.TotalMilliseconds:F0}ms, tamaÒo: {sample.Length} bytes");
         }
 
         if (_frameCount % 25 == 0)
         {
-            Console.WriteLine($"[FFmpegProcess] üìπ Frames enviados: {_frameCount}");
+            Console.WriteLine($"[FFmpegProcess] ?? Frames enviados: {_frameCount}");
         }
 
         OnVideoSourceEncodedSample?.Invoke(durationRtpUnits, sample);
@@ -479,12 +519,12 @@ public class FFmpegProcessSource : IDisposable
         var exitCode = _process?.ExitCode ?? -1;
         _isRunning = false;
 
-        _logger?.LogWarning($"FFmpeg termin√≥ con c√≥digo: {exitCode}");
-        Console.WriteLine($"[FFmpegProcess] FFmpeg termin√≥ con c√≥digo: {exitCode}");
+        _logger?.LogWarning($"FFmpeg terminÛ con cÛdigo: {exitCode}");
+        Console.WriteLine($"[FFmpegProcess] FFmpeg terminÛ con cÛdigo: {exitCode}");
 
         if (exitCode != 0 && !_cts.IsCancellationRequested)
         {
-            OnVideoSourceError?.Invoke($"FFmpeg termin√≥ inesperadamente con c√≥digo: {exitCode}");
+            OnVideoSourceError?.Invoke($"FFmpeg terminÛ inesperadamente con cÛdigo: {exitCode}");
         }
     }
 
@@ -548,6 +588,6 @@ public class FFmpegProcessSource : IDisposable
             _accessUnitBuffer.Clear();
         }
 
-        Console.WriteLine("[FFmpegProcess] ‚úÖ Disposed");
+        Console.WriteLine("[FFmpegProcess] ? Disposed");
     }
 }

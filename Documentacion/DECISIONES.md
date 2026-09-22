@@ -453,3 +453,108 @@ cierre de la sesion WebRTC por ICE.
 el Gateway (deberia responder en milisegundos si esta viva) sin llegar a
 ser un timeout "eterno" que deje la sesion colgada minutos si la camara
 esta realmente caida.
+
+
+## D21 — `FFmpegProcessSource` emitia P-frames antes del primer keyframe real (pantalla negra / "parpadeo")
+
+**Sintoma:** la vista de camara en vivo mostraba pantalla negra permanente,
+a veces con un "parpadeo" de un instante de imagen valida antes de volver a
+negro. El log de la app (WebView) mostraba `"Reproduciendo"` — es decir,
+`video.play()` resolvia su promise — pero nunca se veia imagen real.
+
+**Causa raiz:** con `-c:v copy` (D5, sin recodificar), `ProcessPendingBuffer()`
+emitia **cualquier** access unit que cerrara con un slice VCL H264, sin
+distinguir entre un keyframe real (NAL type 5, IDR) y un frame delta (NAL
+type 1, P-frame). Un P-frame depende de un frame de referencia anterior que
+el decoder del navegador nunca tuvo (es una `RTCPeerConnection` nueva, sin
+historial) — el decoder queda esperando en negro. El "parpadeo" era, cuando
+por azar caia un IDR aislado despues, ese unico frame pintandose un
+instante antes de que el siguiente P-frame (otra vez sin referencia
+decodificable, porque el anterior tampoco lo era) lo tirara abajo de
+nuevo.
+
+**Fix:** un flag `_hasSeenKeyframe` en `FFmpegProcessSource`: se descarta
+(no se emite, no se manda a `SendVideo`) todo access unit hasta ver el
+primer NAL tipo 5 real. A partir de ahi, se emite todo normalmente (los
+P-frames subsiguientes si tienen con que decodificar, porque ya hay un IDR
+de referencia).
+
+**Costo aceptado:** el tiempo hasta la primera imagen pasa a depender
+100% del intervalo de keyframe (GOP) que tenga configurada cada camara en
+su propio firmware — verificado en producción real entre **~0.5s y ~22s**
+segun la camara y el momento de conexion (una camara con GOP largo, tipico
+de fabrica pensado para grabacion/almacenamiento y no para *live view*,
+puede tardar bastante en emitir su proximo IDR). Este fix soluciona la
+corrupcion visual (negro/parpadeo), **no** el tiempo de espera en si — para
+eso, la opcion real es bajar el intervalo de keyframe en la configuracion
+propia de cada camara (tipicamente "I Frame Interval"/"GOP" en su panel
+web), algo que hoy es manual, camara por camara.
+
+## D22 — El puente JS→nativo (`window.location.href` a `app://status`) tiraba abajo la `RTCPeerConnection` justo al empezar a reproducir
+
+**Sintoma:** con D21 ya resuelto (keyframe real llegando y decodificando
+bien, confirmado con frames renderizando a 59-60fps en el log de Android),
+la sesion WebRTC igual se cerraba sola, consistentemente, **milisegundos
+despues** de que `video.play()` resolvia su promise y logueaba
+`"▶️ Reproduciendo"` — con o sin WiFi, con o sin datos moviles, con 0% de
+perdida de paquetes reportada por RTCP (`FractionLost=0, PacketsLost=0`,
+diagnostico agregado ad-hoc con `RTPSession.OnReceiveReport`/`OnTimeout` de
+SIPSorcery), y sin que el estado ICE granular (`oniceconnectionstatechange`)
+mostrara nunca `disconnected`/`failed` antes de saltar directo a `closed`.
+
+**Causa raiz (encontrada con `adb logcat` contra el dispositivo Android
+real, filtrando por el proceso `chromium` del WebView):** apenas
+`video.play()` resolvia, `PlayerPage.cs` (el HTML/JS embebido que sirve el
+Server) llamaba `notifyNativeStatus('connected')`, que hacia
+`window.location.href = 'app://status?state=connected'` — un esquema
+custom pensado como puente JS→nativo: `CameraPlayerPage.xaml.cs`
+intercepta esa navegacion en `OnPlayerWebViewNavigating` (`e.Cancel = true`)
+para ocultar el spinner nativo sin navegar realmente a ningun lado.
+El problema es que **navegar el frame principal, aunque se cancele
+despues**, ya dispara el ciclo de vida de navegacion de Chromium en ese
+frame — confirmado en el log: 17ms despues de "Reproduciendo" aparecen
+`"Codec released"` / `"disconnectFromSurface"` (Android libera el
+`MediaCodec` de video) y un `Relayout` de la `Activity` nativa, y
+milisegundos despues el Gateway recibe un `close_notify` DTLS del lado del
+navegador (confirmado con el logging interno de SIPSorcery conectado via
+`SIPSorcery.LogFactory.Set(...)`, que hasta ese momento no estaba cableado
+a ningun lado y perdia esos diagnosticos). La cancelacion de la navegacion
+llega **despues** de que ese ciclo de vida ya arranco a limpiar recursos
+ligados a la superficie de renderizado — entre ellos, el decoder de video
+que recien habia arrancado.
+
+**Fix:** el puente pasa a navegar un `<iframe>` oculto (creado una sola vez
+y reutilizado) en vez del frame principal — `statusBridgeFrame.src = url`
+en vez de `window.location.href = url`. La navegacion de un subframe SI
+sigue disparando el mismo callback nativo (`shouldOverrideUrlLoading`, que
+es lo que respalda `Navigating` en MAUI) porque Android invoca ese
+callback tambien para subframes — la unica diferencia documentada es que
+Android **no permite cancelar** una navegacion de subframe (la carga
+igual, aunque se intente `e.Cancel = true`), lo cual acá es intrascendente:
+es un iframe invisible sin ningun recurso de media atado, asi que un
+intento de navegacion fallido (el esquema `app://` no es un protocolo
+real) ahi adentro no tiene ningun efecto visible ni secundario.
+
+**Metodologia que llevo a encontrarlo (vale la pena repetirla ante un bug
+similar):** una vez que la telemetria "de red" (perdida de paquetes,
+jitter, estado ICE granular) vino completamente limpia, quedaba descartado
+que fuera un problema de congestion/timeout — la unica fuente de verdad que
+quedaba sin revisar era el **log de consola JS dentro del WebView**, no
+accesible desde ningun log de la app ni del Gateway. Conectar
+`adb logcat` filtrado por el PID del proceso `chromium` del WebView (no
+por el PID de la app en si, que es un proceso Java/Kotlin separado del
+proceso de renderizado de Chromium) durante una reproduccion en vivo, con
+la marca de tiempo exacta de cuando el usuario entraba a la vista, fue lo
+que expuso la secuencia real evento-por-evento — cosa que ningun log de
+.NET (app, Server o Gateway) podia mostrar porque el problema vivia
+enteramente en el lado JS/Chromium del puente.
+
+**Aprendizaje general:** un puente JS→nativo basado en interceptar
+navegaciones de URL (`window.location.href` a un esquema custom, patron
+clasico de WebViews embebidos pre-`postMessage`) **nunca deberia navegar el
+frame que tiene contenido con estado que no se puede permitir perder**
+(video, audio, un formulario con datos sin guardar, etc.) — aunque la
+navegacion se cancele del lado nativo, iniciarla ya tiene efectos
+secundarios en el frame. Un `<iframe>` oculto dedicado exclusivamente al
+puente aisla esos efectos secundarios del contenido real de la pagina, sin
+perder la compatibilidad con el mecanismo de interceptar por URL.
